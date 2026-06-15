@@ -30,8 +30,14 @@ async function getKlines(symbol, interval = '1h', limit = 100) {
   });
 }
 
+function calcEMA(closes, period) {
+  const k = 2 / (period + 1);
+  let val = closes[0];
+  for (let i = 1; i < closes.length; i++) val = closes[i] * k + val * (1 - k);
+  return val;
+}
+
 function calcRSI(closes, period = 14) {
-  if (closes.length < period + 1) return 50;
   let gains = 0, losses = 0;
   for (let i = closes.length - period; i < closes.length; i++) {
     const diff = closes[i] - closes[i - 1];
@@ -44,14 +50,24 @@ function calcRSI(closes, period = 14) {
   return 100 - (100 / (1 + avgGain / avgLoss));
 }
 
+function calcStochRSI(closes, period = 14) {
+  const rsiValues = [];
+  for (let i = period; i < closes.length; i++) {
+    rsiValues.push(calcRSI(closes.slice(i - period, i + 1)));
+  }
+  const recent = rsiValues.slice(-period);
+  const minRSI = Math.min(...recent);
+  const maxRSI = Math.max(...recent);
+  if (maxRSI === minRSI) return 50;
+  return ((rsiValues[rsiValues.length - 1] - minRSI) / (maxRSI - minRSI)) * 100;
+}
+
 function calcMACD(closes) {
-  const ema = (data, period) => {
-    const k = 2 / (period + 1);
-    let val = data[0];
-    for (let i = 1; i < data.length; i++) val = data[i] * k + val * (1 - k);
-    return val;
-  };
-  return ema(closes, 12) - ema(closes, 26);
+  const ema12 = calcEMA(closes, 12);
+  const ema26 = calcEMA(closes, 26);
+  const macdLine = ema12 - ema26;
+  const signalLine = calcEMA(closes.slice(-9).map((_, i) => calcEMA(closes.slice(0, closes.length - 9 + i + 1), 12) - calcEMA(closes.slice(0, closes.length - 9 + i + 1), 26)), 9);
+  return { macd: macdLine, signal: signalLine, histogram: macdLine - signalLine };
 }
 
 function calcBollinger(closes, period = 20) {
@@ -72,36 +88,92 @@ function calcATR(klines, period = 14) {
   return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
 }
 
+function calcSupertrend(klines, period = 10, multiplier = 3) {
+  const closes = klines.map(k => parseFloat(k[4]));
+  const highs = klines.map(k => parseFloat(k[2]));
+  const lows = klines.map(k => parseFloat(k[3]));
+  const atr = calcATR(klines, period);
+  const price = closes[closes.length - 1];
+  const hl2 = (highs[highs.length - 1] + lows[lows.length - 1]) / 2;
+  const upperBand = hl2 + multiplier * atr;
+  const lowerBand = hl2 - multiplier * atr;
+  return price > lowerBand ? 'صاعد' : 'هابط';
+}
+
+function calcVolume(klines) {
+  const volumes = klines.map(k => parseFloat(k[5]));
+  const avgVolume = volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+  const currentVolume = volumes[volumes.length - 1];
+  return { current: currentVolume, avg: avgVolume, ratio: (currentVolume / avgVolume).toFixed(2) };
+}
+
 async function analyzeSymbol(symbol) {
   try {
     const klines = await getKlines(symbol);
     const closes = klines.map(k => parseFloat(k[4]));
-    const highs = klines.map(k => parseFloat(k[2]));
-    const lows = klines.map(k => parseFloat(k[3]));
     const currentPrice = closes[closes.length - 1];
 
     const rsi = calcRSI(closes);
-    const macd = calcMACD(closes);
+    const stochRsi = calcStochRSI(closes);
+    const macdData = calcMACD(closes);
     const bb = calcBollinger(closes);
     const atr = calcATR(klines);
+    const supertrend = calcSupertrend(klines);
+    const volume = calcVolume(klines);
+    const ema9 = calcEMA(closes, 9);
+    const ema21 = calcEMA(closes, 21);
+    const ema50 = calcEMA(closes, 50);
 
-    // حساب الهدف ووقف الخسارة
-    const recentHigh = Math.max(...highs.slice(-20));
-    const recentLow = Math.min(...lows.slice(-20));
     const stopLoss = currentPrice - (atr * 1.5);
     const target = currentPrice + (atr * 3);
     const riskReward = ((target - currentPrice) / (currentPrice - stopLoss)).toFixed(1);
 
-    const score = (rsi > 50 ? 1 : 0) + (macd > 0 ? 1 : 0) + (currentPrice > bb.middle ? 1 : 0);
+    // حساب النقاط
+    let score = 0;
+    if (rsi > 50 && rsi < 70) score++;
+    if (stochRsi > 50) score++;
+    if (macdData.macd > 0) score++;
+    if (macdData.histogram > 0) score++;
+    if (currentPrice > bb.middle) score++;
+    if (supertrend === 'صاعد') score++;
+    if (volume.ratio > 1.2) score++;
+    if (currentPrice > ema9 && currentPrice > ema21) score++;
 
     return {
-      symbol, price: currentPrice, rsi: rsi.toFixed(1),
-      macd, bb, atr, stopLoss, target, riskReward,
-      recentHigh, recentLow, score
+      symbol, price: currentPrice, rsi, stochRsi, macdData,
+      bb, atr, supertrend, volume, ema9, ema21, ema50,
+      stopLoss, target, riskReward, score
     };
   } catch (e) {
     return null;
   }
+}
+
+function formatAnalysis(r) {
+  const signal = r.score >= 6 ? '🟢 دخول قوي' : r.score >= 4 ? '🟡 دخول محتمل' : '🔴 انتظر';
+  const pct = (n) => ((n - r.price) / r.price * 100).toFixed(2);
+
+  return (
+    `📊 *${r.symbol}*\n\n` +
+    `💰 السعر: ${r.price.toFixed(4)}\n\n` +
+    `📈 *المؤشرات:*\n` +
+    `• RSI: ${r.rsi.toFixed(1)} ${r.rsi > 50 && r.rsi < 70 ? '✅' : '❌'}\n` +
+    `• StochRSI: ${r.stochRsi.toFixed(1)} ${r.stochRsi > 50 ? '✅' : '❌'}\n` +
+    `• MACD: ${r.macdData.macd > 0 ? '✅ صاعد' : '❌ هابط'}\n` +
+    `• Histogram: ${r.macdData.histogram > 0 ? '✅ موجب' : '❌ سالب'}\n` +
+    `• Bollinger: ${r.price > r.bb.middle ? '✅ فوق المتوسط' : '❌ تحت المتوسط'}\n` +
+    `• Supertrend: ${r.supertrend === 'صاعد' ? '✅ صاعد' : '❌ هابط'}\n` +
+    `• Volume: ${r.volume.ratio}x ${r.volume.ratio > 1.2 ? '✅ مرتفع' : '❌ منخفض'}\n` +
+    `• EMA9: ${r.price > r.ema9 ? '✅ فوق' : '❌ تحت'}\n` +
+    `• EMA21: ${r.price > r.ema21 ? '✅ فوق' : '❌ تحت'}\n` +
+    `• EMA50: ${r.price > r.ema50 ? '✅ فوق' : '❌ تحت'}\n\n` +
+    `*النتيجة: ${r.score}/8*\n` +
+    `${signal}\n\n` +
+    `🎯 الهدف: ${r.target.toFixed(4)} (+${pct(r.target)}%)\n` +
+    `🛑 وقف الخسارة: ${r.stopLoss.toFixed(4)} (${pct(r.stopLoss)}%)\n` +
+    `⚖️ نسبة المخاطرة: 1:${r.riskReward}\n\n` +
+    `⚠️ للأغراض التعليمية فقط.`
+  );
 }
 
 async function scanMarket() {
@@ -114,27 +186,9 @@ async function scanMarket() {
   const results = [];
   for (const symbol of symbols) {
     const r = await analyzeSymbol(symbol);
-    if (r && r.score >= 2) results.push(r);
+    if (r && r.score >= 4) results.push(r);
   }
   return results.sort((a, b) => b.score - a.score);
-}
-
-function formatAnalysis(r) {
-  const signal = r.score === 3 ? '🟢 دخول قوي' : r.score === 2 ? '🟡 دخول محتمل' : '🔴 انتظر';
-  const pct = (n) => ((n - r.price) / r.price * 100).toFixed(2);
-
-  return (
-    `📊 *${r.symbol}*\n\n` +
-    `💰 السعر: ${r.price.toFixed(4)}\n` +
-    `📈 RSI: ${r.rsi} ${r.rsi > 50 ? '✅' : '❌'}\n` +
-    `📉 MACD: ${r.macd > 0 ? '✅ صاعد' : '❌ هابط'}\n` +
-    `📊 Bollinger: ${r.price > r.bb.middle ? '✅ فوق المتوسط' : '❌ تحت المتوسط'}\n\n` +
-    `${signal}\n\n` +
-    `🎯 الهدف: ${r.target.toFixed(4)} (+${pct(r.target)}%)\n` +
-    `🛑 وقف الخسارة: ${r.stopLoss.toFixed(4)} (${pct(r.stopLoss)}%)\n` +
-    `⚖️ نسبة المخاطرة: 1:${r.riskReward}\n\n` +
-    `⚠️ للأغراض التعليمية فقط.`
-  );
 }
 
 function getMainMenu() {
@@ -166,17 +220,16 @@ bot.on('message', async (msg) => {
   if (!text || text.startsWith('/')) return;
 
   if (text === '🔍 مسح السوق' || text === '⭐ Spot فرص' || text === '🚀 Futures فرص') {
-    bot.sendMessage(chatId, '⏳ جاري مسح السوق، استنى...');
+    bot.sendMessage(chatId, '⏳ جاري مسح السوق، استنى دقيقة...');
     const results = await scanMarket();
     if (results.length === 0) {
       bot.sendMessage(chatId, '😐 مفيش فرص كويسة دلوقتي.', getMainMenu());
       return;
     }
-    let response = `📊 *أفضل الفرص دلوقتي:*\n\n`;
-    for (const r of results.slice(0, 5)) {
-      response += formatAnalysis(r) + '\n\n---\n\n';
+    for (const r of results.slice(0, 3)) {
+      await bot.sendMessage(chatId, formatAnalysis(r), { parse_mode: 'Markdown' });
     }
-    bot.sendMessage(chatId, response, { parse_mode: 'Markdown', ...getMainMenu() });
+    bot.sendMessage(chatId, '✅ انتهى المسح!', getMainMenu());
     return;
   }
 
@@ -190,23 +243,20 @@ bot.on('message', async (msg) => {
       '📖 *كيفية الاستخدام:*\n\n' +
       '🔍 *مسح السوق* — يفحص 20 عملة\n' +
       '📊 *تحليل عملة* — تكتب اسم العملة\n\n' +
-      'البوت بيحسب:\n' +
-      '• RSI و MACD و Bollinger\n' +
-      '• الهدف ووقف الخسارة تلقائي\n' +
-      '• نسبة المخاطرة\n\n' +
+      '*المؤشرات المستخدمة:*\n' +
+      '• RSI + StochRSI\n• MACD + Histogram\n• Bollinger Bands\n• Supertrend\n• Volume\n• EMA 9/21/50\n• ATR\n\n' +
       '⚠️ للأغراض التعليمية فقط.',
       { parse_mode: 'Markdown', ...getMainMenu() }
     );
     return;
   }
 
-  // تحليل عملة محددة
   const symbol = text.toUpperCase().replace('/', '').replace('USDT', '') + 'USDT';
   bot.sendMessage(chatId, `⏳ جاري تحليل ${symbol}...`);
   const result = await analyzeSymbol(symbol);
 
   if (!result) {
-    bot.sendMessage(chatId, '❌ مش لاقي العملة دي. تأكد من الاسم.', getMainMenu());
+    bot.sendMessage(chatId, '❌ مش لاقي العملة دي.', getMainMenu());
     return;
   }
 
