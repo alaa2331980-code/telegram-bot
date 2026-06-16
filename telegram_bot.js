@@ -1,13 +1,62 @@
 const TelegramBot = require('node-telegram-bot-api');
 const https = require('https');
 
+// ============================================================
+// الإعدادات الأساسية
+// ============================================================
 const BOT_TOKEN = '8780661149:AAHrPfSfJpS18RVoXZ5b4Vj9mtFJ8kgRRGQ';
-const ADMIN_CHAT_ID = '5941806593';
 const BINANCE_API_KEY = process.env.BINANCE_API_KEY || '';
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-console.log('البوت شغال! النسخة المتقدمة v3');
+// Whitelist - فقط هذا الـ ID يستطيع استخدام البوت
+const ALLOWED_USERS = ['5941806593'];
 
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+console.log('البوت شغال! النسخة الاحترافية v4');
+
+// ============================================================
+// JSON Schema للإشارة
+// ============================================================
+/*
+{
+  symbol: "BTCUSDT",
+  direction: "Long" | "Short",
+  score: 85,
+  grade: "قوي" | "قوي جداً" | "عادي" | "مرفوض",
+  entry: 65000.00,
+  target: 67500.00,
+  stopLoss: 63800.00,
+  riskReward: "1:1.8",
+  scoreBreakdown: {
+    trend: 18,        // max 20
+    alignment: 12,    // max 15
+    adx: 8,           // max 10
+    volume: 9,        // max 10
+    macd: 8,          // max 10
+    rsi: 8,           // max 10
+    marketStructure: 9, // max 10
+    supportResistance: 4, // max 5
+    riskReward: 9     // max 10
+  },
+  rejectReasons: [],
+  indicators: {
+    rsi: 58.5,
+    adx: 28.3,
+    macd: "Bullish",
+    histogram: "Positive",
+    supertrend: "صاعد",
+    vwap: 64800.00,
+    ema200: 62000.00,
+    volume_ratio: 1.45,
+    trend_1h: "صاعد",
+    trend_4h: "صاعد"
+  },
+  timestamp: "2026-06-16T10:30:00Z"
+}
+*/
+
+// ============================================================
+// دالة جلب الكاندلز
+// ============================================================
 async function getKlines(symbol, interval = '1h', limit = 200) {
   return new Promise((resolve, reject) => {
     const path = `/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
@@ -24,7 +73,7 @@ async function getKlines(symbol, interval = '1h', limit = 200) {
         try {
           const parsed = JSON.parse(data);
           if (Array.isArray(parsed)) resolve(parsed);
-          else { console.error(`API Error ${symbol}:`, parsed.msg); reject(new Error(parsed.msg)); }
+          else reject(new Error(parsed.msg || 'API Error'));
         } catch (e) { reject(e); }
       });
     });
@@ -34,7 +83,10 @@ async function getKlines(symbol, interval = '1h', limit = 200) {
   });
 }
 
-function calcEMA(closes, period = 14) {
+// ============================================================
+// المؤشرات
+// ============================================================
+function calcEMA(closes, period) {
   const k = 2 / (period + 1);
   let val = closes[0];
   for (let i = 1; i < closes.length; i++) val = closes[i] * k + val * (1 - k);
@@ -72,13 +124,6 @@ function calcMACD(closes) {
   return { macd: macdLine, signal: signalLine, histogram: macdLine - signalLine };
 }
 
-function calcBollinger(closes, period = 20) {
-  const slice = closes.slice(-period);
-  const mean = slice.reduce((a, b) => a + b, 0) / period;
-  const std = Math.sqrt(slice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period);
-  return { upper: mean + 2 * std, middle: mean, lower: mean - 2 * std };
-}
-
 function calcATR(klines, period = 14) {
   const trs = [];
   for (let i = 1; i < klines.length; i++) {
@@ -89,78 +134,15 @@ function calcATR(klines, period = 14) {
   return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
 }
 
-function calcSupertrend(klines, period = 14, multiplier = 3) {
-  if (klines.length < period + 1) return 'غير محدد';
-  const highs = klines.map(k => parseFloat(k[2]));
-  const lows = klines.map(k => parseFloat(k[3]));
-  const closes = klines.map(k => parseFloat(k[4]));
-  const trs = [0];
-  for (let i = 1; i < klines.length; i++) {
-    trs.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i-1]), Math.abs(lows[i] - closes[i-1])));
-  }
-  const atrArr = new Array(klines.length).fill(0);
-  for (let i = period; i < klines.length; i++)
-    atrArr[i] = trs.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0) / period;
-  let direction = new Array(klines.length).fill(1);
-  let upperBand = new Array(klines.length).fill(0);
-  let lowerBand = new Array(klines.length).fill(0);
-  for (let i = period; i < klines.length; i++) {
-    const hl2 = (highs[i] + lows[i]) / 2;
-    upperBand[i] = hl2 + multiplier * atrArr[i];
-    lowerBand[i] = hl2 - multiplier * atrArr[i];
-    if (i === period) { direction[i] = closes[i] > lowerBand[i] ? 1 : -1; continue; }
-    lowerBand[i] = (lowerBand[i] > lowerBand[i-1] || closes[i-1] < lowerBand[i-1]) ? lowerBand[i] : lowerBand[i-1];
-    upperBand[i] = (upperBand[i] < upperBand[i-1] || closes[i-1] > upperBand[i-1]) ? upperBand[i] : upperBand[i-1];
-    if (direction[i-1] === -1 && closes[i] > upperBand[i]) direction[i] = 1;
-    else if (direction[i-1] === 1 && closes[i] < lowerBand[i]) direction[i] = -1;
-    else direction[i] = direction[i-1];
-  }
-  return direction[direction.length - 1] === 1 ? 'صاعد' : 'هابط';
-}
-
-function calcVolume(klines) {
-  const volumes = klines.map(k => parseFloat(k[5]));
-  const avgVolume = volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
-  const currentVolume = volumes[volumes.length - 1];
-  return { current: currentVolume, avg: avgVolume, ratio: parseFloat((currentVolume / avgVolume).toFixed(2)) };
-}
-
-function calcVWAP(klines) {
-  const slice = klines.slice(-24);
-  let cTPV = 0, cVol = 0;
-  for (const k of slice) {
-    const tp = (parseFloat(k[2]) + parseFloat(k[3]) + parseFloat(k[4])) / 3;
-    const vol = parseFloat(k[5]);
-    cTPV += tp * vol; cVol += vol;
-  }
-  return cVol === 0 ? 0 : cTPV / cVol;
-}
-
-function calcOBV(klines) {
-  const slice = klines.slice(-50);
-  let obv = 0;
-  const obvValues = [0];
-  for (let i = 1; i < slice.length; i++) {
-    const close = parseFloat(slice[i][4]), prevClose = parseFloat(slice[i-1][4]);
-    const volume = parseFloat(slice[i][5]);
-    if (close > prevClose) obv += volume;
-    else if (close < prevClose) obv -= volume;
-    obvValues.push(obv);
-  }
-  const recent = obvValues.slice(-10);
-  return { value: obv, trend: recent[recent.length-1] > recent[0] ? 'صاعد' : 'هابط' };
-}
-
 function calcADX(klines, period = 14) {
-  if (klines.length < period * 2) return { adx: 0, trend: 'ضعيف' };
+  if (klines.length < period * 2) return { adx: 0, plusDI: 0, minusDI: 0 };
   const highs = klines.map(k => parseFloat(k[2]));
   const lows = klines.map(k => parseFloat(k[3]));
   const closes = klines.map(k => parseFloat(k[4]));
   const trArr = [], plusDM = [], minusDM = [];
   for (let i = 1; i < klines.length; i++) {
     const tr = Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i-1]), Math.abs(lows[i] - closes[i-1]));
-    const upMove = highs[i] - highs[i-1];
-    const downMove = lows[i-1] - lows[i];
+    const upMove = highs[i] - highs[i-1], downMove = lows[i-1] - lows[i];
     trArr.push(tr);
     plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
     minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
@@ -171,224 +153,530 @@ function calcADX(klines, period = 14) {
   const plusDI = smoothTR === 0 ? 0 : (smoothPDM / smoothTR) * 100;
   const minusDI = smoothTR === 0 ? 0 : (smoothMDM / smoothTR) * 100;
   const dx = (plusDI + minusDI) === 0 ? 0 : (Math.abs(plusDI - minusDI) / (plusDI + minusDI)) * 100;
-  let trend = 'ضعيف';
-  if (dx > 25) trend = plusDI > minusDI ? 'صاعد قوي' : 'هابط قوي';
-  else if (dx > 15) trend = 'متوسط';
-  return { adx: parseFloat(dx.toFixed(1)), plusDI: parseFloat(plusDI.toFixed(1)), minusDI: parseFloat(minusDI.toFixed(1)), trend };
-}function calcDivergence(klines) {
-  const closes = klines.slice(-30).map(k => parseFloat(k[4]));
-  const rsiValues = [];
-  for (let i = 14; i < closes.length; i++)
-    rsiValues.push(calcRSI(closes.slice(i - 14, i + 1)));
-  if (rsiValues.length < 5) return 'لا يوجد';
-  const recentCloses = closes.slice(-5);
-  const recentRSI = rsiValues.slice(-5);
-  const priceHigher = recentCloses[recentCloses.length-1] > recentCloses[0];
-  const rsiLower = recentRSI[recentRSI.length-1] < recentRSI[0];
-  const priceLower = recentCloses[recentCloses.length-1] < recentCloses[0];
-  const rsiHigher = recentRSI[recentRSI.length-1] > recentRSI[0];
-  if (priceHigher && rsiLower) return 'هبوطي ⚠️';
-  if (priceLower && rsiHigher) return 'صعودي ✅';
-  return 'لا يوجد';
+  return { adx: parseFloat(dx.toFixed(1)), plusDI: parseFloat(plusDI.toFixed(1)), minusDI: parseFloat(minusDI.toFixed(1)) };
 }
 
-function calcIchimoku(klines) {
+function calcSupertrend(klines, period = 14, multiplier = 3) {
+  if (klines.length < period + 1) return 'غير محدد';
   const highs = klines.map(k => parseFloat(k[2]));
   const lows = klines.map(k => parseFloat(k[3]));
   const closes = klines.map(k => parseFloat(k[4]));
-  const currentPrice = closes[closes.length - 1];
-  const tenkanHigh = Math.max(...highs.slice(-9));
-  const tenkanLow = Math.min(...lows.slice(-9));
-  const tenkan = (tenkanHigh + tenkanLow) / 2;
-  const kijunHigh = Math.max(...highs.slice(-26));
-  const kijunLow = Math.min(...lows.slice(-26));
-  const kijun = (kijunHigh + kijunLow) / 2;
-  const senkouA = (tenkan + kijun) / 2;
-  const senkou52High = Math.max(...highs.slice(-52));
-  const senkou52Low = Math.min(...lows.slice(-52));
-  const senkouB = (senkou52High + senkou52Low) / 2;
-  const cloudTop = Math.max(senkouA, senkouB);
-  const cloudBottom = Math.min(senkouA, senkouB);
-  let signal = 'محايد';
-  if (currentPrice > cloudTop && tenkan > kijun) signal = 'صاعد قوي ✅';
-  else if (currentPrice > cloudTop) signal = 'صاعد ✅';
-  else if (currentPrice < cloudBottom && tenkan < kijun) signal = 'هابط قوي ❌';
-  else if (currentPrice < cloudBottom) signal = 'هابط ❌';
-  else signal = 'داخل السحابة ⚠️';
-  return { tenkan, kijun, senkouA, senkouB, cloudTop, cloudBottom, signal };
+  const trs = [0];
+  for (let i = 1; i < klines.length; i++)
+    trs.push(Math.max(highs[i]-lows[i], Math.abs(highs[i]-closes[i-1]), Math.abs(lows[i]-closes[i-1])));
+  const atrArr = new Array(klines.length).fill(0);
+  for (let i = period; i < klines.length; i++)
+    atrArr[i] = trs.slice(i-period+1, i+1).reduce((a,b) => a+b, 0) / period;
+  let direction = new Array(klines.length).fill(1);
+  let upper = new Array(klines.length).fill(0);
+  let lower = new Array(klines.length).fill(0);
+  for (let i = period; i < klines.length; i++) {
+    const hl2 = (highs[i]+lows[i])/2;
+    upper[i] = hl2 + multiplier * atrArr[i];
+    lower[i] = hl2 - multiplier * atrArr[i];
+    if (i === period) { direction[i] = closes[i] > lower[i] ? 1 : -1; continue; }
+    lower[i] = (lower[i] > lower[i-1] || closes[i-1] < lower[i-1]) ? lower[i] : lower[i-1];
+    upper[i] = (upper[i] < upper[i-1] || closes[i-1] > upper[i-1]) ? upper[i] : upper[i-1];
+    if (direction[i-1] === -1 && closes[i] > upper[i]) direction[i] = 1;
+    else if (direction[i-1] === 1 && closes[i] < lower[i]) direction[i] = -1;
+    else direction[i] = direction[i-1];
+  }
+  return direction[direction.length-1] === 1 ? 'صاعد' : 'هابط';
+}
+
+function calcVWAP(klines) {
+  const slice = klines.slice(-24);
+  let cTPV = 0, cVol = 0;
+  for (const k of slice) {
+    const tp = (parseFloat(k[2])+parseFloat(k[3])+parseFloat(k[4]))/3;
+    cTPV += tp * parseFloat(k[5]); cVol += parseFloat(k[5]);
+  }
+  return cVol === 0 ? 0 : cTPV / cVol;
+}
+
+function calcVolume(klines) {
+  const volumes = klines.map(k => parseFloat(k[5]));
+  const avg = volumes.slice(-20).reduce((a,b) => a+b, 0) / 20;
+  return { current: volumes[volumes.length-1], avg, ratio: parseFloat((volumes[volumes.length-1]/avg).toFixed(2)) };
 }
 
 function calcSupportResistance(klines) {
-  const slice = klines.slice(-50);
+  const slice = klines.slice(-60);
   const highs = slice.map(k => parseFloat(k[2]));
   const lows = slice.map(k => parseFloat(k[3]));
   const closes = slice.map(k => parseFloat(k[4]));
-  const currentPrice = closes[closes.length - 1];
+  const price = closes[closes.length-1];
   const pivots = [];
-  for (let i = 2; i < slice.length - 2; i++) {
+  for (let i = 2; i < slice.length-2; i++) {
     if (highs[i] > highs[i-1] && highs[i] > highs[i-2] && highs[i] > highs[i+1] && highs[i] > highs[i+2])
-      pivots.push({ type: 'resistance', price: highs[i] });
+      pivots.push({ type: 'R', price: highs[i] });
     if (lows[i] < lows[i-1] && lows[i] < lows[i-2] && lows[i] < lows[i+1] && lows[i] < lows[i+2])
-      pivots.push({ type: 'support', price: lows[i] });
+      pivots.push({ type: 'S', price: lows[i] });
   }
-  const resistances = pivots.filter(p => p.type === 'resistance' && p.price > currentPrice)
-    .map(p => p.price).sort((a, b) => a - b).slice(0, 2);
-  const supports = pivots.filter(p => p.type === 'support' && p.price < currentPrice)
-    .map(p => p.price).sort((a, b) => b - a).slice(0, 2);
+  const resistances = pivots.filter(p => p.type==='R' && p.price > price).map(p => p.price).sort((a,b)=>a-b);
+  const supports = pivots.filter(p => p.type==='S' && p.price < price).map(p => p.price).sort((a,b)=>b-a);
   return {
-    resistance1: resistances[0] || currentPrice * 1.02,
-    resistance2: resistances[1] || currentPrice * 1.04,
-    support1: supports[0] || currentPrice * 0.98,
-    support2: supports[1] || currentPrice * 0.96,
+    r1: resistances[0] || price*1.02,
+    r2: resistances[1] || price*1.04,
+    s1: supports[0] || price*0.98,
+    s2: supports[1] || price*0.96,
   };
 }
+// ============================================================
+// Market Structure - كشف HH/HL أو LL/LH
+// ============================================================
+function calcMarketStructure(klines) {
+  const slice = klines.slice(-20);
+  const highs = slice.map(k => parseFloat(k[2]));
+  const lows = slice.map(k => parseFloat(k[3]));
 
-async function getTrendAlignment(symbol) {
-  try {
-    const [k15m, k1h, k4h] = await Promise.all([
-      getKlines(symbol, '15m', 100),
-      getKlines(symbol, '1h', 100),
-      getKlines(symbol, '4h', 100),
-    ]);
-    const getDir = (klines) => {
-      const closes = klines.map(k => parseFloat(k[4]));
-      const macd = calcMACD(closes);
-      const ema21 = calcEMA(closes, 21);
-      const price = closes[closes.length - 1];
-      return price > ema21 && macd.macd > 0 ? 'صاعد' : 'هابط';
-    };
-    const dir15m = getDir(k15m), dir1h = getDir(k1h), dir4h = getDir(k4h);
-    return { dir15m, dir1h, dir4h, aligned: dir15m === dir1h && dir1h === dir4h, direction: dir4h };
-  } catch (e) {
-    return { dir15m: '؟', dir1h: '؟', dir4h: '؟', aligned: false, direction: 'محايد' };
-  }
+  const recentHighs = highs.slice(-5);
+  const recentLows = lows.slice(-5);
+
+  const hhhl = recentHighs[4] > recentHighs[2] && recentLows[4] > recentLows[2];
+  const lllh = recentHighs[4] < recentHighs[2] && recentLows[4] < recentLows[2];
+
+  if (hhhl) return { structure: 'صاعد', label: 'HH/HL ✅' };
+  if (lllh) return { structure: 'هابط', label: 'LL/LH ✅' };
+  return { structure: 'محايد', label: 'Range ⚠️' };
 }
 
+// ============================================================
+// اتجاه فريم معين
+// ============================================================
+function getFrameDirection(klines) {
+  const closes = klines.map(k => parseFloat(k[4]));
+  const price = closes[closes.length-1];
+  const ema20 = calcEMA(closes, 20);
+  const ema50 = calcEMA(closes, 50);
+  const macd = calcMACD(closes);
+  if (price > ema20 && price > ema50 && macd.macd > 0) return 'صاعد';
+  if (price < ema20 && price < ema50 && macd.macd < 0) return 'هابط';
+  return 'محايد';
+}
+
+// ============================================================
+// نظام التقييم الاحترافي من 100
+// ============================================================
+function calculateScore(data) {
+  const {
+    price, ema200, vwap, rsi, stochRsi, macdData, adx,
+    volume, supertrend, sr, marketStructure, dir1h, dir4h, atr
+  } = data;
+
+  let score = 0;
+  let rejectReasons = [];
+  const breakdown = {};
+
+  // تحديد الاتجاه المقترح
+  const bullish = price > ema200 && price > vwap;
+  const bearish = price < ema200 && price < vwap;
+  const direction = bullish ? 'Long' : bearish ? 'Short' : null;
+
+  // ============================================================
+  // قواعد الرفض الفوري
+  // ============================================================
+  if (!direction) {
+    rejectReasons.push('❌ السعر بين EMA200 و VWAP — اتجاه غير واضح');
+    return { score: 0, direction: null, rejectReasons, breakdown };
+  }
+
+  if (adx.adx < 18) {
+    rejectReasons.push(`❌ ADX=${adx.adx} أقل من 18 — السوق Range`);
+    return { score: 0, direction, rejectReasons, breakdown };
+  }
+
+  if (dir1h !== dir4h) {
+    rejectReasons.push(`❌ الفريمات غير متوافقة — 1H: ${dir1h} / 4H: ${dir4h}`);
+    return { score: 0, direction, rejectReasons, breakdown };
+  }
+
+  if (marketStructure.structure === 'محايد') {
+    rejectReasons.push('❌ Market Structure غير واضح — Range ضيق');
+    return { score: 0, direction, rejectReasons, breakdown };
+  }
+
+  // RSI للـ Long لازم 55-68، للـ Short لازم 32-45
+  const rsiOk = direction === 'Long' ? (rsi >= 55 && rsi <= 68) : (rsi >= 32 && rsi <= 45);
+  if (!rsiOk) {
+    rejectReasons.push(`❌ RSI=${rsi.toFixed(1)} خارج النطاق المثالي (Long: 55-68 / Short: 32-45)`);
+    return { score: 0, direction, rejectReasons, breakdown };
+  }
+
+  // ============================================================
+  // حساب النقاط
+  // ============================================================
+
+  // 1. الاتجاه العام (20 نقطة)
+  let trendScore = 0;
+  if (direction === 'Long') {
+    if (price > ema200) trendScore += 8;
+    if (price > vwap) trendScore += 6;
+    if (supertrend === 'صاعد') trendScore += 6;
+  } else {
+    if (price < ema200) trendScore += 8;
+    if (price < vwap) trendScore += 6;
+    if (supertrend === 'هابط') trendScore += 6;
+  }
+  breakdown.trend = trendScore;
+  score += trendScore;
+
+  // 2. توافق الفريمات (15 نقطة)
+  let alignScore = 0;
+  if (dir1h === dir4h) alignScore += 10;
+  if (dir1h === direction) alignScore += 5;
+  breakdown.alignment = alignScore;
+  score += alignScore;
+
+  // 3. ADX (10 نقاط)
+  let adxScore = 0;
+  if (adx.adx >= 30) adxScore = 10;
+  else if (adx.adx >= 25) adxScore = 8;
+  else if (adx.adx >= 20) adxScore = 6;
+  else if (adx.adx >= 18) adxScore = 4;
+  breakdown.adx = adxScore;
+  score += adxScore;
+
+  // 4. الحجم (10 نقاط)
+  let volScore = 0;
+  if (volume.ratio >= 2.0) volScore = 10;
+  else if (volume.ratio >= 1.5) volScore = 8;
+  else if (volume.ratio >= 1.2) volScore = 6;
+  else if (volume.ratio >= 1.0) volScore = 3;
+  if (volume.ratio < 1.2) rejectReasons.push(`⚠️ الحجم منخفض: x${volume.ratio}`);
+  breakdown.volume = volScore;
+  score += volScore;
+
+  // 5. MACD + Histogram (10 نقاط)
+  let macdScore = 0;
+  if (direction === 'Long') {
+    if (macdData.macd > 0) macdScore += 5;
+    if (macdData.histogram > 0) macdScore += 5;
+  } else {
+    if (macdData.macd < 0) macdScore += 5;
+    if (macdData.histogram < 0) macdScore += 5;
+  }
+  breakdown.macd = macdScore;
+  score += macdScore;
+
+  // 6. RSI (10 نقاط)
+  let rsiScore = 0;
+  if (direction === 'Long') {
+    if (rsi >= 60 && rsi <= 65) rsiScore = 10;
+    else if (rsi >= 55 && rsi <= 68) rsiScore = 7;
+  } else {
+    if (rsi >= 35 && rsi <= 40) rsiScore = 10;
+    else if (rsi >= 32 && rsi <= 45) rsiScore = 7;
+  }
+  // StochRSI ضد الاتجاه = خصم
+  const stochAgainst = direction === 'Long' ? stochRsi < 30 : stochRsi > 70;
+  if (stochAgainst) {
+    rsiScore = Math.max(0, rsiScore - 3);
+    rejectReasons.push(`⚠️ StochRSI=${stochRsi.toFixed(1)} ضد الاتجاه`);
+    if (adx.adx < 22) {
+      rejectReasons.push('❌ StochRSI ضد الاتجاه مع ADX ضعيف — رفض');
+      return { score: 0, direction, rejectReasons, breakdown };
+    }
+  }
+  breakdown.rsi = rsiScore;
+  score += rsiScore;
+
+  // 7. Market Structure (10 نقاط)
+  let msScore = 0;
+  if (direction === 'Long' && marketStructure.structure === 'صاعد') msScore = 10;
+  else if (direction === 'Short' && marketStructure.structure === 'هابط') msScore = 10;
+  else msScore = 3;
+  breakdown.marketStructure = msScore;
+  score += msScore;
+
+  // 8. الدعم/المقاومة (5 نقاط)
+  let srScore = 5;
+  const atrDistance = atr * 0.3; // مسافة "قريب جداً"
+  if (direction === 'Long') {
+    if (sr.r1 - price < atrDistance) {
+      srScore = 0;
+      rejectReasons.push(`❌ مقاومة قريبة جداً: ${sr.r1.toFixed(4)} (فرق ${(sr.r1-price).toFixed(4)})`);
+    }
+  } else {
+    if (price - sr.s1 < atrDistance) {
+      srScore = 0;
+      rejectReasons.push(`❌ دعم قريب جداً: ${sr.s1.toFixed(4)} (فرق ${(price-sr.s1).toFixed(4)})`);
+    }
+  }
+  breakdown.supportResistance = srScore;
+  score += srScore;
+
+  // 9. Risk/Reward (10 نقاط)
+  const entry = price;
+  const target = direction === 'Long' ? sr.r1 : sr.s1;
+  const stopLoss = direction === 'Long'
+    ? Math.max(sr.s1, price - atr * 1.5)
+    : Math.min(sr.r1, price + atr * 1.5);
+  const rrRaw = Math.abs(target - entry) / Math.abs(entry - stopLoss);
+  const rr = parseFloat(rrRaw.toFixed(2));
+
+  let rrScore = 0;
+  if (rr >= 3.0) rrScore = 10;
+  else if (rr >= 2.5) rrScore = 9;
+  else if (rr >= 2.0) rrScore = 8;
+  else if (rr >= 1.5) rrScore = 6;
+  else {
+    rrScore = 0;
+    rejectReasons.push(`❌ R:R=${rr} أقل من 1:1.5 — رفض`);
+    return { score: 0, direction, rejectReasons, breakdown, entry, target, stopLoss, rr };
+  }
+  breakdown.riskReward = rrScore;
+  score += rrScore;
+
+  return { score, direction, rejectReasons, breakdown, entry, target, stopLoss, rr };
+}
+
+// ============================================================
+// تحليل عملة واحدة
+// ============================================================
 async function analyzeSymbol(symbol) {
   try {
-    const klines = await getKlines(symbol, '1h', 200);
-    if (!klines || klines.length < 60) { console.log(`${symbol} | بيانات غير كافية`); return null; }
-    const closes = klines.map(k => parseFloat(k[4]));
-    const currentPrice = closes[closes.length - 1];
-    const rsi = calcRSI(closes), stochRsi = calcStochRSI(closes);
-    const macdData = calcMACD(closes), bb = calcBollinger(closes);
-    const atr = calcATR(klines), supertrend = calcSupertrend(klines);
-    const volume = calcVolume(klines);
-    const ema9 = calcEMA(closes, 9), ema21 = calcEMA(closes, 21);
-    const ema50 = calcEMA(closes, 50);
-    const ema200 = closes.length >= 200 ? calcEMA(closes, 200) : null;
-    const vwap = calcVWAP(klines), obv = calcOBV(klines);
-    const adx = calcADX(klines), divergence = calcDivergence(klines);
-    const ichimoku = calcIchimoku(klines), sr = calcSupportResistance(klines);
-    const trendAlign = await getTrendAlignment(symbol);
-    const stopLoss = Math.max(sr.support1, currentPrice - (atr * 1.5));
-    const target = Math.min(sr.resistance1, currentPrice + (atr * 3));
-    const riskReward = ((target - currentPrice) / (currentPrice - stopLoss)).toFixed(1);
-    let score = 0;
-    if (rsi > 50 && rsi < 70) score++;
-    if (stochRsi > 50) score++;
-    if (macdData.macd > 0) score++;
-    if (macdData.histogram > 0) score++;
-    if (currentPrice > bb.middle) score++;
-    if (supertrend === 'صاعد') score++;
-    if (volume.ratio > 1.0) score++;
-    if (currentPrice > ema9 && currentPrice > ema21) score++;
-    if (ema200 && currentPrice > ema200) score++;
-    if (currentPrice > vwap) score++;
-    if (obv.trend === 'صاعد') score++;
-    if (adx.adx > 25 && adx.plusDI > adx.minusDI) score++;
-    if (divergence === 'صعودي ✅') score++;
-    if (ichimoku.signal.includes('صاعد')) score++;
-    if (trendAlign.aligned && trendAlign.direction === 'صاعد') score++;
-    if (divergence === 'هبوطي ⚠️') score = Math.max(0, score - 1);
-    if (parseFloat(riskReward) < 1.5) score = Math.max(0, score - 2);
-    console.log(`${symbol} | Score=${score}/15 | RSI=${rsi.toFixed(1)} | ADX=${adx.adx} | Ichimoku=${ichimoku.signal} | Align=${trendAlign.aligned} | Div=${divergence}`);
-    const signal = trendAlign.dir4h === 'هابط' ? 'Short 📉' : trendAlign.aligned ? 'Long قوي 🚀' : 'Long 📈';
-    return { symbol, score, rsi, stochRsi, macdData, bb, supertrend, volume, atr, ema9, ema21, ema50, ema200, vwap, obv, adx, divergence, ichimoku, sr, trendAlign, stopLoss, target, riskReward, price: currentPrice, signal };
-  } catch (e) { console.log(`${symbol} | خطأ: ${e.message}`); return null; }
-}
+    const [klines1h, klines4h] = await Promise.all([
+      getKlines(symbol, '1h', 200),
+      getKlines(symbol, '4h', 200),
+    ]);
 
-function getOpportunityLabel(score) {
-  if (score >= 12) return '🟢 فرصة قوية جداً';
-  if (score >= 9) return '🟡 فرصة جيدة';
-  if (score >= 6) return '🔵 فرصة مراقبة';
-  return null;
-}
+    if (!klines1h || klines1h.length < 60) return null;
 
-const SYMBOLS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','LINKUSDT','MATICUSDT','LTCUSDT','ATOMUSDT','NEARUSDT','OPUSDT','ARBUSDT','APTUSDT','INJUSDT','SUIUSDT','TIAUSDT'];
+    const closes = klines1h.map(k => parseFloat(k[4]));
+    const price = closes[closes.length-1];
 
-async function scanMarket() {
-  console.log('=== بدء مسح السوق المتقدم ===');
-  const results = [];
-  for (const symbol of SYMBOLS) {
-    const r = await analyzeSymbol(symbol);
-    if (r && r.score >= 6) results.push(r);
+    const ema200 = closes.length >= 200 ? calcEMA(closes, 200) : calcEMA(closes, closes.length);
+    const vwap = calcVWAP(klines1h);
+    const rsi = calcRSI(closes);
+    const stochRsi = calcStochRSI(closes);
+    const macdData = calcMACD(closes);
+    const adx = calcADX(klines1h);
+    const atr = calcATR(klines1h);
+    const volume = calcVolume(klines1h);
+    const supertrend = calcSupertrend(klines1h);
+    const sr = calcSupportResistance(klines1h);
+    const marketStructure = calcMarketStructure(klines1h);
+    const dir1h = getFrameDirection(klines1h);
+    const dir4h = getFrameDirection(klines4h);
+
+    const result = calculateScore({
+      price, ema200, vwap, rsi, stochRsi, macdData, adx,
+      volume, supertrend, sr, marketStructure, dir1h, dir4h, atr
+    });
+
+    console.log(`${symbol} | Score=${result.score}/100 | Dir=${result.direction} | ADX=${adx.adx} | RSI=${rsi.toFixed(1)} | 1H=${dir1h} | 4H=${dir4h} | RR=${result.rr}`);
+
+    return {
+      symbol, price, ema200, vwap, rsi, stochRsi, macdData,
+      adx, volume, supertrend, sr, marketStructure,
+      dir1h, dir4h, atr,
+      ...result,
+      timestamp: new Date().toISOString()
+    };
+  } catch (e) {
+    console.log(`${symbol} | خطأ: ${e.message}`);
+    return null;
   }
-  console.log(`=== انتهى المسح: ${results.length} فرصة ===`);
-  return results.sort((a, b) => b.score - a.score);
 }
 
-async function getTop5Summary() {
-  const all = [];
-  for (const symbol of SYMBOLS) { const r = await analyzeSymbol(symbol); if (r) all.push(r); }
-  all.sort((a, b) => b.score - a.score);
-  let msg = '📊 *لا توجد فرص كافية الآن — أفضل 5 عملات:*\n\n';
-  for (const r of all.slice(0, 5)) msg += `${getOpportunityLabel(r.score) || '⚪'} ${r.symbol}  Score: ${r.score}/15\n`;
-  return msg;
+// ============================================================
+// تقييم الإشارة
+// ============================================================
+function getGrade(score) {
+  if (score >= 90) return { label: '🔥 قوي جداً', emoji: '🔥' };
+  if (score >= 80) return { label: '🟢 قوي', emoji: '🟢' };
+  if (score >= 65) return { label: '🟡 عادي', emoji: '🟡' };
+  return { label: '🔴 مرفوض', emoji: '🔴' };
 }
 
-function formatAnalysis(r) {
-  const label = getOpportunityLabel(r.score) || '🔵 فرصة مراقبة';
-  const ema200Status = r.ema200 ? (r.price > r.ema200 ? '✅ فوق' : '❌ تحت') : '⚪ غير متاح';
+// ============================================================
+// تنسيق الإشارة
+// ============================================================
+function formatSignal(r) {
+  if (r.score === 0 || !r.direction) {
+    return (
+      `❌ *${r.symbol} — مرفوض*\n\n` +
+      `*أسباب الرفض:*\n` +
+      r.rejectReasons.map(x => `${x}`).join('\n')
+    );
+  }
+
+  const grade = getGrade(r.score);
+  const dirEmoji = r.direction === 'Long' ? '📈' : '📉';
+  const rrStr = `1:${r.rr}`;
+
   return (
-    `📊 *${r.symbol}*\n\n💰 السعر: \`${r.price.toFixed(4)}\`\n🎯 ${label}\n🚦 الإشارة: *${r.signal}*\n\n` +
-    `🕐 *اتجاه الفريمات:*\n• 15M: ${r.trendAlign.dir15m === 'صاعد' ? '✅' : '❌'} ${r.trendAlign.dir15m}\n• 1H: ${r.trendAlign.dir1h === 'صاعد' ? '✅' : '❌'} ${r.trendAlign.dir1h}\n• 4H: ${r.trendAlign.dir4h === 'صاعد' ? '✅' : '❌'} ${r.trendAlign.dir4h}\n• التوافق: ${r.trendAlign.aligned ? '✅ متوافق' : '❌ غير متوافق'}\n\n` +
-    `📈 *المؤشرات الأساسية:*\n• RSI: ${r.rsi.toFixed(1)} ${r.rsi > 50 && r.rsi < 70 ? '✅' : '❌'}\n• StochRSI: ${r.stochRsi.toFixed(1)} ${r.stochRsi > 50 ? '✅' : '❌'}\n• MACD: ${r.macdData.macd > 0 ? '✅ صاعد' : '❌ هابط'}\n• Histogram: ${r.macdData.histogram > 0 ? '✅ موجب' : '❌ سالب'}\n• بولينجر: ${r.price > r.bb.middle ? '✅ فوق المتوسط' : '❌ تحت المتوسط'}\n• Supertrend: ${r.supertrend === 'صاعد' ? '✅ صاعد' : '❌ هابط'}\n• الحجم: ${r.volume.ratio > 1.0 ? '✅' : '❌'} x${r.volume.ratio}\n\n` +
-    `📊 *المؤشرات المتقدمة:*\n• EMA9/21: ${r.price > r.ema9 && r.price > r.ema21 ? '✅ فوق' : '❌ تحت'}\n• EMA50: ${r.price > r.ema50 ? '✅ فوق' : '❌ تحت'}\n• EMA200: ${ema200Status}\n• VWAP: ${r.price > r.vwap ? '✅ فوق' : '❌ تحت'}\n• OBV: ${r.obv.trend === 'صاعد' ? '✅ صاعد' : '❌ هابط'}\n• ADX: ${r.adx.adx} ${r.adx.adx > 25 ? '✅ ترند قوي' : '⚠️ ترند ضعيف'}\n• Divergence: ${r.divergence}\n• Ichimoku: ${r.ichimoku.signal}\n\n` +
-    `🏗️ *الدعم والمقاومة:*\n• مقاومة 2: \`${r.sr.resistance2.toFixed(4)}\`\n• مقاومة 1: \`${r.sr.resistance1.toFixed(4)}\`\n• السعر: \`${r.price.toFixed(4)}\`\n• دعم 1: \`${r.sr.support1.toFixed(4)}\`\n• دعم 2: \`${r.sr.support2.toFixed(4)}\`\n\n` +
-    `*⭐ النتيجة: ${r.score}/15*\n\n🎯 الهدف: \`${r.target.toFixed(4)}\`\n🔴 وقف الخسارة: \`${r.stopLoss.toFixed(4)}\`\n📐 Risk/Reward: ${r.riskReward}:1\n\n⚠️ للأغراض التعليمية فقط`
+    `${grade.emoji} *${r.symbol} — ${r.direction} ${dirEmoji}*\n\n` +
+    `💰 السعر: \`${r.price.toFixed(4)}\`\n` +
+    `🎯 التقييم: *${grade.label}* (${r.score}/100)\n\n` +
+
+    `📋 *تفاصيل النقاط:*\n` +
+    `• الاتجاه العام: ${r.breakdown.trend}/20\n` +
+    `• توافق الفريمات: ${r.breakdown.alignment}/15\n` +
+    `• ADX: ${r.breakdown.adx}/10 (${r.adx.adx})\n` +
+    `• الحجم: ${r.breakdown.volume}/10 (x${r.volume.ratio})\n` +
+    `• MACD/Histogram: ${r.breakdown.macd}/10\n` +
+    `• RSI: ${r.breakdown.rsi}/10 (${r.rsi.toFixed(1)})\n` +
+    `• Market Structure: ${r.breakdown.marketStructure}/10 (${r.marketStructure.label})\n` +
+    `• الدعم/المقاومة: ${r.breakdown.supportResistance}/5\n` +
+    `• Risk/Reward: ${r.breakdown.riskReward}/10\n\n` +
+
+    `🕐 *الفريمات:*\n` +
+    `• 1H: ${r.dir1h === 'صاعد' ? '✅' : '❌'} ${r.dir1h}\n` +
+    `• 4H: ${r.dir4h === 'صاعد' ? '✅' : '❌'} ${r.dir4h}\n\n` +
+
+    `🏗️ *الدعم والمقاومة:*\n` +
+    `• مقاومة 1: \`${r.sr.r1.toFixed(4)}\`\n` +
+    `• السعر: \`${r.price.toFixed(4)}\`\n` +
+    `• دعم 1: \`${r.sr.s1.toFixed(4)}\`\n\n` +
+
+    `📊 *الصفقة:*\n` +
+    `• الدخول: \`${r.entry.toFixed(4)}\`\n` +
+    `• الهدف: \`${r.target.toFixed(4)}\`\n` +
+    `• وقف الخسارة: \`${r.stopLoss.toFixed(4)}\`\n` +
+    `• R:R = ${rrStr}\n\n` +
+
+    (r.rejectReasons.length > 0 ? `⚠️ *تحذيرات:*\n${r.rejectReasons.join('\n')}\n\n` : '') +
+    `⚠️ للأغراض التعليمية فقط`
   );
 }
 
-function getMainMenu() {
-  return { reply_markup: { keyboard: [[{ text: '🔍 مسح السوق' }, { text: '📊 تحليل العملة' }],[{ text: '🚀 Futures فرص' }, { text: '💎 حدد الفرص' }],[{ text: 'ℹ️ المساعدة' }]], resize_keyboard: true } };
+// ============================================================
+// قائمة العملات
+// ============================================================
+const SYMBOLS = [
+  'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
+  'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT',
+  'MATICUSDT', 'LTCUSDT', 'ATOMUSDT', 'NEARUSDT', 'OPUSDT',
+  'ARBUSDT', 'APTUSDT', 'INJUSDT', 'SUIUSDT', 'TIAUSDT'
+];
+
+// ============================================================
+// مسح السوق
+// ============================================================
+async function scanMarket() {
+  console.log('=== بدء المسح الاحترافي ===');
+  const results = [];
+  for (const symbol of SYMBOLS) {
+    const r = await analyzeSymbol(symbol);
+    if (r && r.score >= 65) results.push(r);
+  }
+  console.log(`=== انتهى المسح: ${results.length} إشارة ===`);
+  return results.sort((a, b) => b.score - a.score);
 }
 
+// ============================================================
+// القائمة الرئيسية
+// ============================================================
+function getMainMenu() {
+  return {
+    reply_markup: {
+      keyboard: [
+        [{ text: '🔍 مسح السوق' }, { text: '📊 تحليل عملة' }],
+        [{ text: '🚀 أفضل الفرص' }, { text: 'ℹ️ المساعدة' }],
+      ],
+      resize_keyboard: true,
+    },
+  };
+}
+
+// ============================================================
+// التحقق من المستخدم
+// ============================================================
+function isAllowed(chatId) {
+  return ALLOWED_USERS.includes(chatId.toString());
+}
+
+// ============================================================
+// أوامر البوت
+// ============================================================
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  if (chatId.toString() !== ADMIN_CHAT_ID) { bot.sendMessage(chatId, '🚫 البوت خاص.'); return; }
-  bot.sendMessage(chatId, '👋 أهلاً! النسخة المتقدمة v3\n\nاختار من القائمة 🎮', getMainMenu());
+  if (!isAllowed(chatId)) { bot.sendMessage(chatId, '🚫 البوت خاص.'); return; }
+  bot.sendMessage(chatId,
+    '👋 أهلاً! النسخة الاحترافية v4\n\n' +
+    '🎯 نظام تقييم من 100 نقطة\n' +
+    '✅ 12 شرط للفلترة\n' +
+    '📊 رفض فوري للإشارات الضعيفة\n\n' +
+    'اختار من القائمة 👇',
+    getMainMenu()
+  );
 });
 
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
-  if (chatId.toString() !== ADMIN_CHAT_ID) return;
+  if (!isAllowed(chatId)) { bot.sendMessage(chatId, '🚫 البوت خاص.'); return; }
   if (!text) return;
-  if (text === '🔍 مسح السوق' || text === '💎 حدد الفرص' || text === '🚀 Futures فرص') {
-    await bot.sendMessage(chatId, '⏳ جاري المسح المتقدم... (قد يستغرق 2-3 دقائق)');
+
+  if (text === '🔍 مسح السوق' || text === '🚀 أفضل الفرص') {
+    await bot.sendMessage(chatId, '⏳ جاري المسح الاحترافي... (2-3 دقائق)');
     const results = await scanMarket();
+
     if (results.length === 0) {
-      const top5msg = await getTop5Summary();
-      await bot.sendMessage(chatId, top5msg, { parse_mode: 'Markdown', ...getMainMenu() });
+      await bot.sendMessage(chatId,
+        '📊 *لا توجد إشارات تجاوزت 65 نقطة الآن*\n\n' +
+        'السوق في حالة Range أو الشروط غير مكتملة.\n' +
+        'انتظر فرصة أفضل. ⏳',
+        { parse_mode: 'Markdown', ...getMainMenu() }
+      );
       return;
     }
-    for (const r of results.slice(0, 3)) await bot.sendMessage(chatId, formatAnalysis(r), { parse_mode: 'Markdown' });
-    await bot.sendMessage(chatId, '✅ انتهى المسح', getMainMenu());
+
+    for (const r of results.slice(0, 3)) {
+      await bot.sendMessage(chatId, formatSignal(r), { parse_mode: 'Markdown' });
+    }
+    await bot.sendMessage(chatId, `✅ انتهى المسح — ${results.length} إشارة`, getMainMenu());
     return;
   }
-  if (text === '📊 تحليل العملة') { await bot.sendMessage(chatId, '📊 اكتب اسم العملة:\nمثال: BTC أو ETH أو SOL'); return; }
+
+  if (text === '📊 تحليل عملة') {
+    await bot.sendMessage(chatId, '📊 اكتب اسم العملة:\nمثال: BTC أو ETH أو SOL');
+    return;
+  }
+
   if (text === 'ℹ️ المساعدة') {
-    await bot.sendMessage(chatId, '📖 *النسخة المتقدمة v3*\n\n*15 مؤشر:*\nRSI • MACD • StochRSI • بولينجر\nSupertrend • ATR • Volume\nEMA9/21/50/200 • VWAP • OBV\nADX • Divergence • Ichimoku\nدعم/مقاومة • توافق الفريمات\n\n*تصنيف:*\n🟢 12-15 = قوية جداً\n🟡 9-11 = جيدة\n🔵 6-8 = مراقبة\n\n⚠️ للأغراض التعليمية فقط', { parse_mode: 'Markdown', ...getMainMenu() });
+    await bot.sendMessage(chatId,
+      '📖 *النسخة الاحترافية v4*\n\n' +
+      '*نظام التقييم (100 نقطة):*\n' +
+      '• الاتجاه العام: 20\n' +
+      '• توافق الفريمات: 15\n' +
+      '• ADX: 10\n' +
+      '• الحجم: 10\n' +
+      '• MACD/Histogram: 10\n' +
+      '• RSI: 10\n' +
+      '• Market Structure: 10\n' +
+      '• الدعم/المقاومة: 5\n' +
+      '• Risk/Reward: 10\n\n' +
+      '*قرار الإرسال:*\n' +
+      '🔥 90+ = قوي جداً\n' +
+      '🟢 80-89 = قوي\n' +
+      '🟡 65-79 = عادي\n' +
+      '🔴 أقل من 65 = مرفوض\n\n' +
+      '*شروط الرفض الفوري:*\n' +
+      '• ADX أقل من 18\n' +
+      '• R:R أقل من 1:1.5\n' +
+      '• الفريمات غير متوافقة\n' +
+      '• RSI خارج النطاق\n' +
+      '• Market Structure غير واضح\n\n' +
+      '⚠️ للأغراض التعليمية فقط',
+      { parse_mode: 'Markdown', ...getMainMenu() }
+    );
     return;
   }
+
   if (/^[a-zA-Z]{2,10}$/.test(text)) {
     const symbol = text.toUpperCase().replace('USDT', '') + 'USDT';
-    await bot.sendMessage(chatId, `⏳ جاري التحليل المتقدم لـ ${symbol}...`);
+    await bot.sendMessage(chatId, `⏳ جاري التحليل الاحترافي لـ ${symbol}...`);
     const result = await analyzeSymbol(symbol);
-    if (!result) { await bot.sendMessage(chatId, '❌ مش لاقي العملة دي أو في خطأ', getMainMenu()); return; }
-    await bot.sendMessage(chatId, formatAnalysis(result), { parse_mode: 'Markdown', ...getMainMenu() });
+    if (!result) {
+      await bot.sendMessage(chatId, '❌ مش لاقي العملة دي أو في خطأ', getMainMenu());
+      return;
+    }
+    await bot.sendMessage(chatId, formatSignal(result), { parse_mode: 'Markdown', ...getMainMenu() });
   }
 });
 
 bot.on('polling_error', (error) => console.error('خطأ:', error.message));
+
