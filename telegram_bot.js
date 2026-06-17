@@ -6,8 +6,11 @@ const BINANCE_API_KEY = process.env.BINANCE_API_KEY || '';
 const ALLOWED_USERS = ['5941806593'];
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-console.log('البوت شغال! النسخة B — 50 عملة');
+console.log('البوت شغال! النسخة B v2 — 50 عملة + أهداف متعددة');
 
+// ============================================================
+// جلب الكاندلز
+// ============================================================
 async function getKlines(symbol, interval = '1h', limit = 150) {
   return new Promise((resolve, reject) => {
     const path = `/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
@@ -34,6 +37,9 @@ async function getKlines(symbol, interval = '1h', limit = 150) {
   });
 }
 
+// ============================================================
+// المؤشرات الأساسية
+// ============================================================
 function calcEMA(closes, period) {
   const k = 2 / (period + 1);
   let val = closes[0];
@@ -138,24 +144,33 @@ function calcVolume(klines) {
   return {current:volumes[volumes.length-1],avg,ratio:parseFloat((volumes[volumes.length-1]/avg).toFixed(2))};
 }
 
+// ============================================================
+// الدعم والمقاومة - متعدد المستويات (للأهداف المتعددة)
+// ============================================================
 function calcSupportResistance(klines) {
-  const slice=klines.slice(-50);
-  const highs=slice.map(k=>parseFloat(k[2]));
-  const lows=slice.map(k=>parseFloat(k[3]));
-  const closes=slice.map(k=>parseFloat(k[4]));
-  const price=closes[closes.length-1];
-  const pivots=[];
-  for(let i=2;i<slice.length-2;i++){
-    if(highs[i]>highs[i-1]&&highs[i]>highs[i-2]&&highs[i]>highs[i+1]&&highs[i]>highs[i+2])
-      pivots.push({type:'R',price:highs[i]});
-    if(lows[i]<lows[i-1]&&lows[i]<lows[i-2]&&lows[i]<lows[i+1]&&lows[i]<lows[i+2])
-      pivots.push({type:'S',price:lows[i]});
+  const slice = klines.slice(-80);
+  const highs = slice.map(k => parseFloat(k[2]));
+  const lows = slice.map(k => parseFloat(k[3]));
+  const closes = slice.map(k => parseFloat(k[4]));
+  const price = closes[closes.length - 1];
+  const pivots = [];
+  for (let i = 2; i < slice.length - 2; i++) {
+    if (highs[i] > highs[i-1] && highs[i] > highs[i-2] && highs[i] > highs[i+1] && highs[i] > highs[i+2])
+      pivots.push({ type: 'R', price: highs[i] });
+    if (lows[i] < lows[i-1] && lows[i] < lows[i-2] && lows[i] < lows[i+1] && lows[i] < lows[i+2])
+      pivots.push({ type: 'S', price: lows[i] });
   }
-  const resistances=pivots.filter(p=>p.type==='R'&&p.price>price).map(p=>p.price).sort((a,b)=>a-b);
-  const supports=pivots.filter(p=>p.type==='S'&&p.price<price).map(p=>p.price).sort((a,b)=>b-a);
+  const resistances = pivots.filter(p => p.type==='R' && p.price > price)
+    .map(p => p.price).sort((a,b) => a-b);
+  const supports = pivots.filter(p => p.type==='S' && p.price < price)
+    .map(p => p.price).sort((a,b) => b-a);
   return {
-    r1:resistances[0]||price*1.02,
-    s1:supports[0]||price*0.98,
+    r1: resistances[0] || price*1.015,
+    r2: resistances[1] || price*1.03,
+    r3: resistances[2] || price*1.045,
+    s1: supports[0] || price*0.985,
+    s2: supports[1] || price*0.97,
+    s3: supports[2] || price*0.955,
   };
 }
 
@@ -168,7 +183,28 @@ function getFrameDirection(klines) {
   if(price>ema20&&price>ema50&&macd.macd>0)return 'صاعد';
   if(price<ema20&&price<ema50&&macd.macd<0)return 'هابط';
   return 'محايد';
-}async function analyzeSymbol(symbol) {
+}
+
+// ============================================================
+// رابط الأخبار - مجاني بدون API
+// ============================================================
+function getNewsLink(symbol) {
+  const coin = symbol.replace('USDT', '').toLowerCase();
+  return `https://cryptopanic.com/news/${coin}/`;
+}
+
+// ============================================================
+// تصنيف الإشارة - نظام جديد
+// ============================================================
+function getGrade(score) {
+  if (score >= 85) return { label: '🔥 ممتازة', rate: '~75%' };
+  if (score >= 75) return { label: '🟢 قوية', rate: '~65%' };
+  if (score >= 65) return { label: '🟡 جيدة', rate: '~55%' };
+  return { label: '⚪ مراقبة', rate: '~45%' };
+}// ============================================================
+// تحليل عملة واحدة - مع 3 أهداف
+// ============================================================
+async function analyzeSymbol(symbol) {
   try {
     const [klines1h, klines4h] = await Promise.all([
       getKlines(symbol, '1h', 150),
@@ -214,7 +250,7 @@ function getFrameDirection(klines) {
     if (dir1h === dir4h) score += 15;
     if (dir1h === direction) score += 5;
 
-    // ADX (15) - أخف من v4
+    // ADX (15)
     if (adx.adx >= 25) score += 15;
     else if (adx.adx >= 20) score += 12;
     else if (adx.adx >= 15) score += 8;
@@ -229,7 +265,7 @@ function getFrameDirection(klines) {
       if (macdData.histogram < 0) score += 7;
     }
 
-    // RSI (15) - نطاق أوسع من v4
+    // RSI (15)
     if (direction === 'Long') {
       if (rsi >= 50 && rsi <= 70) score += 15;
       else if (rsi >= 45 && rsi <= 75) score += 8;
@@ -243,42 +279,63 @@ function getFrameDirection(klines) {
     else if (volume.ratio >= 1.2) score += 7;
     else if (volume.ratio >= 1.0) score += 4;
 
-    // R:R
+    // ============================================================
+    // حساب 3 أهداف ووقف الخسارة
+    // ============================================================
     const entry = price;
-    const target = direction === 'Long' ? sr.r1 : sr.s1;
-    const stopLoss = direction === 'Long'
-      ? Math.max(sr.s1, price - atr * 1.5)
-      : Math.min(sr.r1, price + atr * 1.5);
-    const rr = parseFloat((Math.abs(target - entry) / Math.abs(entry - stopLoss)).toFixed(2));
+    let target1, target2, target3, stopLoss;
 
-    // رفض لو R:R أقل من 1.5
-    if (rr < 1.5) return null;
+    if (direction === 'Long') {
+      target1 = sr.r1;
+      target2 = sr.r2;
+      target3 = sr.r3;
+      stopLoss = Math.max(sr.s1, price - atr * 1.5);
+    } else {
+      target1 = sr.s1;
+      target2 = sr.s2;
+      target3 = sr.s3;
+      stopLoss = Math.min(sr.r1, price + atr * 1.5);
+    }
 
-    console.log(`${symbol} | Score=${score} | Dir=${direction} | ADX=${adx.adx} | RSI=${rsi.toFixed(1)} | RR=${rr} | 1H=${dir1h} | 4H=${dir4h}`);
+    const riskAmount = Math.abs(entry - stopLoss);
+    const rr1 = parseFloat((Math.abs(target1 - entry) / riskAmount).toFixed(2));
+    const rr2 = parseFloat((Math.abs(target2 - entry) / riskAmount).toFixed(2));
+    const rr3 = parseFloat((Math.abs(target3 - entry) / riskAmount).toFixed(2));
 
-    return { symbol, score, direction, price, rsi, macdData, adx, volume, supertrend, sr, dir1h, dir4h, entry, target, stopLoss, rr, atr, vwap, ema200 };
+    // رفض لو الهدف الأول R:R أقل من 1.5
+    if (rr1 < 1.5) return null;
+
+    console.log(`${symbol} | Score=${score} | Dir=${direction} | ADX=${adx.adx} | RSI=${rsi.toFixed(1)} | RR1=${rr1} | 1H=${dir1h} | 4H=${dir4h}`);
+
+    return {
+      symbol, score, direction, price, rsi, macdData, adx, volume,
+      supertrend, sr, dir1h, dir4h, atr, vwap, ema200,
+      entry, target1, target2, target3, stopLoss, rr1, rr2, rr3,
+      newsLink: getNewsLink(symbol)
+    };
   } catch (e) {
     console.log(`${symbol} | خطأ: ${e.message}`);
     return null;
   }
 }
 
-function getGrade(score) {
-  if (score >= 75) return '🔥 قوي جداً';
-  if (score >= 55) return '🟡 عادي';
-  return '🔴 مرفوض';
-}
-
+// ============================================================
+// تنسيق الإشارة - مع 3 أهداف وأخبار
+// ============================================================
 function formatSignal(r) {
   const grade = getGrade(r.score);
   const dirEmoji = r.direction === 'Long' ? '📈' : '📉';
+
   return (
-    `${grade} *${r.symbol} — ${r.direction} ${dirEmoji}*\n\n` +
+    `${grade.label} *${r.symbol} — ${r.direction} ${dirEmoji}*\n\n` +
     `💰 السعر: \`${r.price.toFixed(4)}\`\n` +
-    `⭐ Score: *${r.score}/100*\n\n` +
+    `⭐ Score: *${r.score}/100*\n` +
+    `🎯 نسبة النجاح المتوقعة: ${grade.rate}\n\n` +
+
     `🕐 *الفريمات:*\n` +
     `• 1H: ${r.dir1h === 'صاعد' ? '✅' : '❌'} ${r.dir1h}\n` +
     `• 4H: ${r.dir4h === 'صاعد' ? '✅' : '❌'} ${r.dir4h}\n\n` +
+
     `📊 *المؤشرات:*\n` +
     `• RSI: ${r.rsi.toFixed(1)}\n` +
     `• MACD: ${r.macdData.macd > 0 ? '✅ صاعد' : '❌ هابط'}\n` +
@@ -286,15 +343,25 @@ function formatSignal(r) {
     `• Supertrend: ${r.supertrend === 'صاعد' ? '✅ صاعد' : '❌ هابط'}\n` +
     `• الحجم: x${r.volume.ratio} ${r.volume.ratio >= 1.0 ? '✅' : '❌'}\n` +
     `• VWAP: ${r.price > r.vwap ? '✅ فوق' : '❌ تحت'}\n\n` +
+
     `📐 *الصفقة:*\n` +
-    `• الدخول: \`${r.entry.toFixed(4)}\`\n` +
-    `• الهدف: \`${r.target.toFixed(4)}\`\n` +
-    `• وقف الخسارة: \`${r.stopLoss.toFixed(4)}\`\n` +
-    `• R:R = 1:${r.rr}\n\n` +
+    `• الدخول: \`${r.entry.toFixed(4)}\`\n\n` +
+    `🎯 *الأهداف:*\n` +
+    `• الهدف 1: \`${r.target1.toFixed(4)}\` (R:R 1:${r.rr1})\n` +
+    `• الهدف 2: \`${r.target2.toFixed(4)}\` (R:R 1:${r.rr2})\n` +
+    `• الهدف 3: \`${r.target3.toFixed(4)}\` (R:R 1:${r.rr3})\n\n` +
+    `🔴 وقف الخسارة: \`${r.stopLoss.toFixed(4)}\`\n\n` +
+
+    `📰 [أخبار ${r.symbol.replace('USDT','')}](${r.newsLink})\n\n` +
+
+    `💡 *نصيحة:* خد جزء من الربح عند كل هدف (مثلاً 40% / 30% / 30%)\n\n` +
     `⚠️ للأغراض التعليمية فقط`
   );
 }
 
+// ============================================================
+// قائمة العملات - 50 عملة
+// ============================================================
 const SYMBOLS = [
   'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT',
   'ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','LINKUSDT',
@@ -308,17 +375,23 @@ const SYMBOLS = [
   'STXUSDT','FLOWUSDT','MINAUSDT','ROSEUSDT','CELOUSDT'
 ];
 
+// ============================================================
+// مسح السوق
+// ============================================================
 async function scanMarket() {
   console.log('=== بدء مسح 50 عملة ===');
   const results = [];
   for (const symbol of SYMBOLS) {
     const r = await analyzeSymbol(symbol);
-    if (r && r.score >= 55) results.push(r);
+    if (r && r.score >= 65) results.push(r);
   }
   console.log(`=== انتهى المسح: ${results.length} إشارة ===`);
   return results.sort((a, b) => b.score - a.score);
 }
 
+// ============================================================
+// القائمة الرئيسية
+// ============================================================
 function getMainMenu() {
   return {
     reply_markup: {
@@ -333,10 +406,19 @@ function getMainMenu() {
 
 function isAllowed(chatId) { return ALLOWED_USERS.includes(chatId.toString()); }
 
+// ============================================================
+// أوامر البوت
+// ============================================================
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   if (!isAllowed(chatId)) { bot.sendMessage(chatId, '🚫 البوت خاص.'); return; }
-  bot.sendMessage(chatId, '👋 أهلاً! النسخة B — 50 عملة\n\n🎯 إشارات أكثر بجودة عالية\nاختار من القائمة 👇', getMainMenu());
+  bot.sendMessage(chatId,
+    '👋 أهلاً! النسخة B v2 — 50 عملة\n\n' +
+    '🎯 3 أهداف لكل صفقة\n' +
+    '📰 روابط أخبار مباشرة\n\n' +
+    'اختار من القائمة 👇',
+    getMainMenu()
+  );
 });
 
 bot.on('message', async (msg) => {
@@ -366,13 +448,17 @@ bot.on('message', async (msg) => {
 
   if (text === 'ℹ️ المساعدة') {
     await bot.sendMessage(chatId,
-      '📖 *النسخة B*\n\n' +
+      '📖 *النسخة B v2*\n\n' +
       '✅ 50 عملة\n' +
-      '✅ Score من 100\n' +
-      '✅ فلتر R:R فوق 1:1.5\n' +
-      '✅ ADX فوق 10\n\n' +
-      '🔥 75+ = قوي جداً\n' +
-      '🟡 55-74 = عادي\n\n' +
+      '✅ 3 أهداف لكل صفقة\n' +
+      '✅ روابط أخبار مباشرة\n' +
+      '✅ Score من 100\n\n' +
+      '*التصنيف:*\n' +
+      '🔥 85+ = ممتازة (~75%)\n' +
+      '🟢 75-84 = قوية (~65%)\n' +
+      '🟡 65-74 = جيدة (~55%)\n' +
+      '⚪ أقل من 65 = مراقبة فقط\n\n' +
+      '⚠️ النسب تقديرية وليست ضمانة\n' +
       '⚠️ للأغراض التعليمية فقط',
       { parse_mode: 'Markdown', ...getMainMenu() }
     );
