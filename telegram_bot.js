@@ -104,7 +104,7 @@ async function getBTCTrend() {
   if (price < ema && macd.macd < 0) trend = 'Bearish';
 
   return { trend, price };
-        function detectSwingHighs(klines, lb = 3) {
+    }function detectSwingHighs(klines, lb = 3) {
   const h = klines.map(k => +k[2]);
   const out = [];
   for (let i = lb; i < h.length - lb; i++) {
@@ -229,7 +229,7 @@ async function analyzeSymbol(symbol, btc) {
     tp1,
     sl,
   };
-}    function formatSignal(r) {
+}function formatSignal(r) {
   return `
 🔥 ${r.symbol} (${r.grade}) ${r.direction}
 
@@ -260,7 +260,8 @@ async function scanMarket() {
   }
 
   return results.sort((a,b)=>b.score-a.score);
-}     }غbot.onText(/\/start/, (msg) => {
+}
+bot.onText(/\/start/, (msg) => {
   const userId = String(msg.from.id);
   if (!ALLOWED_USERS.includes(userId)) return;
   bot.sendMessage(msg.chat.id, 'VIP AI Bot Ready 🚀', mainKeyboard);
