@@ -31,6 +31,7 @@ async function getKlines(symbol, interval = '1h', limit = 300) {
       path,
       method: 'GET',
       headers: { 'X-MBX-APIKEY': BINANCE_API_KEY },
+      timeout: 8000,
     };
 
     const req = https.request(options, (res) => {
@@ -48,6 +49,11 @@ async function getKlines(symbol, interval = '1h', limit = 300) {
           reject(e);
         }
       });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Timeout'));
     });
 
     req.on('error', reject);
