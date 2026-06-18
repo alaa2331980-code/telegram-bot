@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const https = require('https');
 
-const BOT_TOKEN = 'YOUR_BOT_TOKEN';
+const BOT_TOKEN = '8780661149:AAHrPfSfJpS18RVoXZ5b4Vj9mtFJ8kgRRGQ';
 const BINANCE_API_KEY = process.env.BINANCE_API_KEY || '';
 const ALLOWED_USERS = ['5941806593'];
 
