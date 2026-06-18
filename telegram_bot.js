@@ -6,6 +6,17 @@ const BINANCE_API_KEY = process.env.BINANCE_API_KEY || '';
 const ALLOWED_USERS = ['5941806593'];
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+const mainKeyboard = {
+  reply_markup: {
+    keyboard: [
+      ['🔍 مسح السوق', '🚀 أفضل الفرص'],
+      ['ℹ️ المساعدة']
+    ],
+    resize_keyboard: true
+  }
+};
+
 console.log('VIP AI BOT RUNNING');
 
 async function getKlines(symbol, interval = '1h', limit = 300) {
@@ -93,9 +104,7 @@ async function getBTCTrend() {
   if (price < ema && macd.macd < 0) trend = 'Bearish';
 
   return { trend, price };
-}
-
-function detectSwingHighs(klines, lb = 3) {
+        function detectSwingHighs(klines, lb = 3) {
   const h = klines.map(k => +k[2]);
   const out = [];
   for (let i = lb; i < h.length - lb; i++) {
@@ -220,9 +229,7 @@ async function analyzeSymbol(symbol, btc) {
     tp1,
     sl,
   };
-}
-
-function formatSignal(r) {
+}    function formatSignal(r) {
   return `
 🔥 ${r.symbol} (${r.grade}) ${r.direction}
 
@@ -237,31 +244,35 @@ TP1: ${r.tp1}
 `;
 }
 
-const SYMBOLS = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT'];
+const SYMBOLS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','MATICUSDT','LINKUSDT','LTCUSDT','BCHUSDT','UNIUSDT','ATOMUSDT','XLMUSDT','ETCUSDT','FILUSDT','APTUSDT','ARBUSDT','OPUSDT','NEARUSDT','INJUSDT','SUIUSDT','TIAUSDT','SEIUSDT','RUNEUSDT','FTMUSDT','SANDUSDT','MANAUSDT','AAVEUSDT','ALGOUSDT','EGLDUSDT','EOSUSDT','XTZUSDT','THETAUSDT','AXSUSDT','GALAUSDT','CHZUSDT','ENJUSDT','ZECUSDT','DASHUSDT','KAVAUSDT','MKRUSDT','COMPUSDT','SNXUSDT','YFIUSDT','CRVUSDT','1INCHUSDT','BATUSDT','ZILUSDT','ICXUSDT','ONTUSDT','QTUMUSDT','OMGUSDT','KSMUSDT','WAVESUSDT','RVNUSDT','HOTUSDT','ANKRUSDT','CELRUSDT','IOSTUSDT','STORJUSDT','SKLUSDT','CTSIUSDT','RSRUSDT','OCEANUSDT','BANDUSDT','NKNUSDT','COTIUSDT'];
 
 async function scanMarket() {
   const btc = await getBTCTrend();
   const results = [];
 
   for (const s of SYMBOLS) {
-    const r = await analyzeSymbol(s, btc);
-    if (r.score >= 60) results.push(r);
+    try {
+      const r = await analyzeSymbol(s, btc);
+      if (r.score >= 60) results.push(r);
+    } catch (err) {
+      console.log('Skip ' + s + ': ' + err.message);
+    }
   }
 
   return results.sort((a,b)=>b.score-a.score);
-}
-
-bot.onText(/\/start/, (msg) => {
+}     }غbot.onText(/\/start/, (msg) => {
   const userId = String(msg.from.id);
   if (!ALLOWED_USERS.includes(userId)) return;
-  bot.sendMessage(msg.chat.id, 'VIP AI Bot Ready 🚀');
+  bot.sendMessage(msg.chat.id, 'VIP AI Bot Ready 🚀', mainKeyboard);
 });
 
 bot.on('message', async (msg) => {
   const userId = String(msg.from.id);
   if (!ALLOWED_USERS.includes(userId)) return;
 
-  if (msg.text === 'scan') {
+  const text = msg.text;
+
+  if (text === 'scan' || text === '🔍 مسح السوق') {
     bot.sendMessage(msg.chat.id, '⏳ بفحص السوق...');
     try {
       const res = await scanMarket();
@@ -276,5 +287,24 @@ bot.on('message', async (msg) => {
       console.log('SCAN ERROR:', err.message);
       bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
     }
+  }
+
+  if (text === '🚀 أفضل الفرص') {
+    bot.sendMessage(msg.chat.id, '⏳ بحدد أفضل الفرص...');
+    try {
+      const res = await scanMarket();
+      if (res.length === 0) {
+        bot.sendMessage(msg.chat.id, 'مفيش فرص قوية دلوقتي');
+      } else {
+        bot.sendMessage(msg.chat.id, formatSignal(res[0]));
+      }
+    } catch (err) {
+      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
+    }
+  }
+
+  if (text === 'ℹ️ المساعدة') {
+    bot.sendMessage(msg.chat.id,
+      'الأوامر المتاحة:\n🔍 مسح السوق - يفحص العملات ويجيب الفرص (سكور 60+)\n🚀 أفضل الفرص - يجيب أقوى فرصة واحدة بس\nℹ️ المساعدة - الرسالة دي');
   }
 });
