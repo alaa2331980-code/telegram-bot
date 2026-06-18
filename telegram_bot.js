@@ -262,9 +262,19 @@ bot.on('message', async (msg) => {
   if (!ALLOWED_USERS.includes(userId)) return;
 
   if (msg.text === 'scan') {
-    const res = await scanMarket();
-    for (const r of res.slice(0, 5)) {
-      bot.sendMessage(msg.chat.id, formatSignal(r));
+    bot.sendMessage(msg.chat.id, '⏳ بفحص السوق...');
+    try {
+      const res = await scanMarket();
+      if (res.length === 0) {
+        bot.sendMessage(msg.chat.id, 'مفيش فرص قوية دلوقتي');
+      } else {
+        for (const r of res.slice(0, 5)) {
+          bot.sendMessage(msg.chat.id, formatSignal(r));
+        }
+      }
+    } catch (err) {
+      console.log('SCAN ERROR:', err.message);
+      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
     }
   }
 });
