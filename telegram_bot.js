@@ -18,7 +18,9 @@ const mainKeyboard = {
 };
 
 console.log('VIP AI BOT RUNNING');
-
+bot.on('polling_error', (err) => {
+  console.log('POLLING ERROR:', err.code, err.message);
+});
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
