@@ -1,4 +1,4 @@
-const TelegramBot = require('node-telegram-bot-api');
+[١٩‏/٦، ٥:١٣ م] عمر علاء حبيبى الجديد: const TelegramBot = require('node-telegram-bot-api');
 const https = require('https');
 
 const BOT_TOKEN = '8780661149:AAHwFEKncDPfJpPcms6SVYodOeHq03Gf2Lc';
@@ -60,7 +60,8 @@ async function getKlines(symbol, interval = '1h', limit = 300) {
     req.on('error', reject);
     req.end();
   });
-function calcEMA(closes, period) {
+}
+[١٩‏/٦، ٥:١٥ م] عمر علاء حبيبى الجديد: function calcEMA(closes, period) {
   const k = 2 / (period + 1);
   let ema = closes[0];
   for (let i = 1; i < closes.length; i++) {
@@ -121,68 +122,106 @@ async function getBTCTrend() {
   if (price > ema && macd.macd > 0) trend = 'Bullish';
   if (price < ema && macd.macd < 0) trend = 'Bearish';
   return { trend, price };
-  function calcEMA(closes, period) {
-  const k = 2 / (period + 1);
-  let ema = closes[0];
-  for (let i = 1; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
+}
+[١٩‏/٦، ٥:١٦ م] عمر علاء حبيبى الجديد: function detectSwingHighs(klines, lb = 3) {
+  const h = klines.map(k => +k[2]);
+  const out = [];
+  for (let i = lb; i < h.length - lb; i++) {
+    let ok = true;
+    for (let j = 1; j <= lb; j++) {
+      if (h[i] <= h[i - j] || h[i] <= h[i + j]) ok = false;
+    }
+    if (ok) out.push({ index: i, price: h[i] });
   }
-  return ema;
+  return out;
 }
 
-function calcEMA200(closes) {
-  return calcEMA(closes, 200);
-}
-
-function calcRSI(closes, period = 14) {
-  let gain = 0, loss = 0;
-  for (let i = closes.length - period; i < closes.length; i++) {
-    const diff = closes[i] - closes[i - 1];
-    if (diff > 0) gain += diff;
-    else loss += Math.abs(diff);
+function detectSwingLows(klines, lb = 3) {
+  const l = klines.map(k => +k[3]);
+  const out = [];
+  for (let i = lb; i < l.length - lb; i++) {
+    let ok = true;
+    for (let j = 1; j <= lb; j++) {
+      if (l[i] >= l[i - j] || l[i] >= l[i + j]) ok = false;
+    }
+    if (ok) out.push({ index: i, price: l[i] });
   }
-  const rs = gain / (loss || 1);
-  return 100 - (100 / (1 + rs));
+  return out;
 }
 
-function calcMACD(closes) {
-  const ema12 = calcEMA(closes, 12);
-  const ema26 = calcEMA(closes, 26);
-  return { macd: ema12 - ema26 };
+function detectBOS(klines) {
+  const highs = detectSwingHighs(klines);
+  const lows = detectSwingLows(klines);
+  const price = +klines.at(-1)[4];
+  const lastSwingHigh = highs.length ? highs[highs.length - 1].price : price;
+  const lastSwingLow = lows.length ? lows[lows.length - 1].price : price;
+  return {
+    bullish: price > lastSwingHigh,
+    bearish: price < lastSwingLow,
+    lastSwingHigh,
+    lastSwingLow,
+  };
 }
 
-function calcATR(klines, period = 14) {
-  const trs = [];
-  for (let i = 1; i < klines.length; i++) {
-    const h = +klines[i][2];
-    const l = +klines[i][3];
-    const pc = +klines[i - 1][4];
-    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+function detectLiquidity(klines) {
+  const highs = klines.map(k => +k[2]);
+  const lows = klines.map(k => +k[3]);
+  const recentHighs = highs.slice(-15, -1);
+  const recentLows = lows.slice(-15, -1);
+  return {
+    sweepHigh: highs.at(-1) > Math.max(...recentHighs),
+    sweepLow: lows.at(-1) < Math.min(...recentLows),
+  };
+}
+
+function detectPatterns(klines) {
+  const o = +klines.at(-1)[1];
+  const c = +klines.at(-1)[4];
+  return { bullish: c > o, bearish: c < o };
+}
+
+function detectOrderBlocks(klines, direction) {
+  const recent = klines.slice(-30);
+  let found = null;
+  for (let i = recent.length - 3; i > 0; i--) {
+    const o = +recent[i][1];
+    const c = +recent[i][4];
+    const nextC = +recent[i + 1][4];
+    const nextO = +recent[i + 1][1];
+    const moveSize = Math.abs(nextC - nextO);
+    const avgRange = +recent[i][2] - +recent[i][3];
+    if (direction === 'Long' && c < o && nextC > nextO && moveSize > avgRange * 1.5) {
+      found = { high: +recent[i][2], low: +recent[i][3] };
+      break;
+    }
+    if (direction === 'Short' && c > o && nextC < nextO && moveSize > avgRange * 1.5) {
+      found = { high: +recent[i][2], low: +recent[i][3] };
+      break;
+    }
   }
-  return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
+  return found;
 }
 
-function calcVWAP(klines) {
-  let tpv = 0, vol = 0;
-  klines.slice(-24).forEach(k => {
-    const tp = (+k[2] + +k[3] + +k[4]) / 3;
-    tpv += tp * +k[5];
-    vol += +k[5];
-  });
-  return tpv / vol;
+function detectFVG(klines, direction) {
+  const recent = klines.slice(-20);
+  let found = null;
+  for (let i = recent.length - 3; i >= 0; i--) {
+    const candle1High = +recent[i][2];
+    const candle1Low = +recent[i][3];
+    const candle3High = +recent[i + 2][2];
+    const candle3Low = +recent[i + 2][3];
+    if (direction === 'Long' && candle3Low > candle1High) {
+      found = { top: candle3Low, bottom: candle1High };
+      break;
+    }
+    if (direction === 'Short' && candle3High < candle1Low) {
+      found = { top: candle1Low, bottom: candle3High };
+      break;
+    }
+  }
+  return found;
 }
-
-async function getBTCTrend() {
-  const k = await getKlines('BTCUSDT', '1h', 250);
-  const closes = k.map(x => +x[4]);
-  const price = closes.at(-1);
-  const ema = calcEMA200(closes);
-  const macd = calcMACD(closes);
-  let trend = 'Neutral';
-  if (price > ema && macd.macd > 0) trend = 'Bullish';
-  if (price < ema && macd.macd < 0) trend = 'Bearish';
-  return { trend, price };
-    }function calcSR(klines) {
+[١٩‏/٦، ٥:١٨ م] عمر علاء حبيبى الجديد: function calcSR(klines) {
   const swingHighs = detectSwingHighs(klines, 3).map(h => h.price);
   const swingLows = detectSwingLows(klines, 3).map(l => l.price);
   const price = +klines.at(-1)[4];
@@ -290,7 +329,9 @@ async function analyzeSymbol(symbol, btc) {
     entry,
     tp1: targets.tp1, tp2: targets.tp2, tp3: targets.tp3,
     sl, hasOB: !!ob, hasFVG: !!fvg, confirmed4h,
-    function formatSignal(r) {
+  };
+}
+[١٩‏/٦، ٥:١٩ م] عمر علاء حبيبى الجديد: function formatSignal(r) {
   return `
 🔥 ${r.symbol} ${r.direction}
 ${r.grade}
@@ -387,6 +428,3 @@ bot.on('message', async (msg) => {
       'الأوامر المتاحة:\n🔍 مسح السوق - يفحص 300 عملة ويجيب الفرص (سكور 60+)\n🚀 أفضل الفرص - يجيب أقوى فرصة واحدة بس\nℹ️ المساعدة - الرسالة دي\n\nدرجات الإشارة:\n🟢 ممتازة (85+)\n🔵 جيدة جداً (75-84)\n🟡 جيدة (65-74)\n⚪ عادية (60-64)');
   }
 });
-  };
-}
-}}
