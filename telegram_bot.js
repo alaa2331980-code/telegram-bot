@@ -1,4 +1,4 @@
-[١٩‏/٦، ٥:١٣ م] عمر علاء حبيبى الجديد: const TelegramBot = require('node-telegram-bot-api');
+const TelegramBot = require('node-telegram-bot-api');
 const https = require('https');
 
 const BOT_TOKEN = '8780661149:AAHwFEKncDPfJpPcms6SVYodOeHq03Gf2Lc';
@@ -61,7 +61,8 @@ async function getKlines(symbol, interval = '1h', limit = 300) {
     req.end();
   });
 }
-[١٩‏/٦، ٥:١٥ م] عمر علاء حبيبى الجديد: function calcEMA(closes, period) {
+
+function calcEMA(closes, period) {
   const k = 2 / (period + 1);
   let ema = closes[0];
   for (let i = 1; i < closes.length; i++) {
@@ -123,7 +124,7 @@ async function getBTCTrend() {
   if (price < ema && macd.macd < 0) trend = 'Bearish';
   return { trend, price };
 }
-[١٩‏/٦، ٥:١٦ م] عمر علاء حبيبى الجديد: function detectSwingHighs(klines, lb = 3) {
+function detectSwingHighs(klines, lb = 3) {
   const h = klines.map(k => +k[2]);
   const out = [];
   for (let i = lb; i < h.length - lb; i++) {
@@ -221,7 +222,7 @@ function detectFVG(klines, direction) {
   }
   return found;
 }
-[١٩‏/٦، ٥:١٨ م] عمر علاء حبيبى الجديد: function calcSR(klines) {
+function calcSR(klines) {
   const swingHighs = detectSwingHighs(klines, 3).map(h => h.price);
   const swingLows = detectSwingLows(klines, 3).map(l => l.price);
   const price = +klines.at(-1)[4];
@@ -331,7 +332,7 @@ async function analyzeSymbol(symbol, btc) {
     sl, hasOB: !!ob, hasFVG: !!fvg, confirmed4h,
   };
 }
-[١٩‏/٦، ٥:١٩ م] عمر علاء حبيبى الجديد: function formatSignal(r) {
+function formatSignal(r) {
   return `
 🔥 ${r.symbol} ${r.direction}
 ${r.grade}
@@ -378,6 +379,24 @@ process.on('SIGINT', () => {
   bot.stopPolling();
   process.exit(0);
 });
+const SYMBOLS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','MATICUSDT','LINKUSDT','LTCUSDT','BCHUSDT','UNIUSDT','ATOMUSDT','XLMUSDT','ETCUSDT','FILUSDT','APTUSDT','ARBUSDT','OPUSDT','NEARUSDT','INJUSDT','SUIUSDT','TIAUSDT','SEIUSDT','RUNEUSDT','FTMUSDT','SANDUSDT','MANAUSDT','AAVEUSDT','ALGOUSDT','EGLDUSDT','EOSUSDT','XTZUSDT','THETAUSDT','AXSUSDT','GALAUSDT','CHZUSDT','ENJUSDT','ZECUSDT','DASHUSDT','KAVAUSDT','MKRUSDT','COMPUSDT','SNXUSDT','YFIUSDT','CRVUSDT','BATUSDT','ZILUSDT','ICXUSDT','ONTUSDT','QTUMUSDT','OMGUSDT','KSMUSDT','WAVESUSDT','RVNUSDT','HOTUSDT','ANKRUSDT','CELRUSDT','IOSTUSDT','STORJUSDT','SKLUSDT','CTSIUSDT','RSRUSDT','OCEANUSDT','BANDUSDT','NKNUSDT','COTIUSDT','GRTUSDT','LRCUSDT','DYDXUSDT','ENSUSDT','IMXUSDT','GMTUSDT','APEUSDT','LDOUSDT','MASKUSDT','CFXUSDT','HOOKUSDT','MAGICUSDT','HIGHUSDT','CTKUSDT','PEOPLEUSDT','ROSEUSDT','DUSKUSDT','FLOWUSDT','ALICEUSDT','TLMUSDT','C98USDT','CLVUSDT','ARPAUSDT','LITUSDT','SFPUSDT','BAKEUSDT','BNXUSDT','RAYUSDT','PERPUSDT','TRUUSDT','CKBUSDT','TWTUSDT','FIDAUSDT','AGIXUSDT','OGNUSDT','REEFUSDT','POLYXUSDT','PHBUSDT','HFTUSDT','GLMRUSDT','LOOMUSDT','BICOUSDT','API3USDT','WOOUSDT','ASTRUSDT','RADUSDT','IDEXUSDT','PONDUSDT','VGXUSDT','MDTUSDT','STMXUSDT','DGBUSDT','SXPUSDT','LSKUSDT','NMRUSDT','MTLUSDT','PAXGUSDT','TOMOUSDT','WANUSDT','FUNUSDT','CVCUSDT','BNTUSDT','RLCUSDT','STPTUSDT','DENTUSDT','WINUSDT','BTTCUSDT','ARDRUSDT','VITEUSDT','CHRUSDT','PERLUSDT','COSUSDT','NULSUSDT','VTHOUSDT','KEYUSDT','MITHUSDT','DREPUSDT','TCTUSDT','WRXUSDT','BURGERUSDT','ALPACAUSDT','SUPERUSDT','XVSUSDT','ALPHAUSDT','AUDIOUSDT','EPSUSDT','DODOUSDT','BELUSDT','PNTUSDT','UNFIUSDT','TKOUSDT','PUNDIXUSDT','VIDTUSDT','GTOUSDT','POAUSDT','QKCUSDT','BTSUSDT','BLZUSDT','IRISUSDT','KMDUSDT','JSTUSDT','SCUSDT','ZENUSDT','SRMUSDT','ANTUSDT','NANOUSDT','ATAUSDT','GTCUSDT','TORNUSDT','KEEPUSDT','ERNUSDT','KLAYUSDT','BONDUSDT','MLNUSDT','QUICKUSDT','FORTHUSDT','TRBUSDT','BSWUSDT','VOXELUSDT','XECUSDT','HIVEUSDT','FRONTUSDT','COMBOUSDT','ACMUSDT','AUCTIONUSDT','PROSUSDT','PYRUSDT','LAZIOUSDT','PORTOUSDT','SANTOSUSDT','ALPINEUSDT','CITYUSDT','OGUSDT','ASRUSDT','JUVUSDT','PSGUSDT','BARUSDT','ATMUSDT','ACAUSDT','ANCUSDT','BOSONUSDT','TVKUSDT','BADGERUSDT','FISUSDT','OMUSDT','DARUSDT','ALCXUSDT','SYSUSDT','XNOUSDT','UFTUSDT','REQUSDT','UMAUSDT','XEMUSDT','RENUSDT','KP3RUSDT','TRIBEUSDT','GHSTUSDT','DIAUSDT','ORNUSDT','UTKUSDT','MBLUSDT','SUNUSDT','MDXUSDT','ZRXUSDT','BALUSDT','GNOUSDT','LPTUSDT','RAREUSDT','VIBUSDT','DCRUSDT','ARKUSDT','MFTUSDT','POLSUSDT','CVPUSDT','EPXUSDT','XYOUSDT','LUNAUSDT','LUNCUSDT','USTCUSDT','ICPUSDT','MOVRUSDT','GLMUSDT','SCRTUSDT','AKROUSDT'];
+
+async function scanMarket() {
+  const btc = await getBTCTrend();
+  const results = [];
+
+  for (const s of SYMBOLS) {
+    try {
+      const r = await analyzeSymbol(s, btc);
+      if (r.score >= 60) results.push(r);
+    } catch (err) {
+      console.log('Skip ' + s + ': ' + err.message);
+    }
+    await sleep(150);
+  }
+
+  return results.sort((a,b)=>b.score-a.score);
+}
 
 bot.onText(/\/start/, (msg) => {
   const userId = String(msg.from.id);
@@ -390,6 +409,7 @@ bot.on('message', async (msg) => {
   const userId = String(msg.from.id);
   console.log('MESSAGE - USER ID:', userId);
   if (!ALLOWED_USERS.includes(userId)) return;
+
   const text = msg.text;
 
   if (text === 'scan' || text === '🔍 مسح السوق') {
