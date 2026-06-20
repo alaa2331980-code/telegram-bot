@@ -575,3 +575,311 @@ bot.onText(/\/backtest(?:\s+(.+))?/, async (msg, match) => {
     }
   }
 });
+function calcADX(klines, period = 14) {
+  const plusDMs = [], minusDMs = [], trs = [];
+  for (let i = 1; i < klines.length; i++) {
+    const high = +klines[i][2];
+    const low = +klines[i][3];
+    const prevHigh = +klines[i - 1][2];
+    const prevLow = +klines[i - 1][3];
+    const prevClose = +klines[i - 1][4];
+    const upMove = high - prevHigh;
+    const downMove = prevLow - low;
+    plusDMs.push((upMove > downMove && upMove > 0) ? upMove : 0);
+    minusDMs.push((downMove > upMove && downMove > 0) ? downMove : 0);
+    trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
+  }
+  const recentTR = trs.slice(-period).reduce((a, b) => a + b, 0);
+  const recentPlusDM = plusDMs.slice(-period).reduce((a, b) => a + b, 0);
+  const recentMinusDM = minusDMs.slice(-period).reduce((a, b) => a + b, 0);
+  const plusDI = recentTR === 0 ? 0 : (recentPlusDM / recentTR) * 100;
+  const minusDI = recentTR === 0 ? 0 : (recentMinusDM / recentTR) * 100;
+  const adx = (plusDI + minusDI) === 0 ? 0 : (Math.abs(plusDI - minusDI) / (plusDI + minusDI)) * 100;
+  return { adx, plusDI, minusDI };
+}
+
+function calcBollingerBands(closes, period = 20, stdDevMult = 2) {
+  const slice = closes.slice(-period);
+  const mean = slice.reduce((a, b) => a + b, 0) / slice.length;
+  const variance = slice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / slice.length;
+  const stdDev = Math.sqrt(variance);
+  return { mid: mean, upper: mean + stdDev * stdDevMult, lower: mean - stdDev * stdDevMult };
+}
+
+function calcSupertrend(klines, period = 10, multiplier = 3) {
+  const atr = calcATR(klines, period);
+  const last = klines.at(-1);
+  const high = +last[2];
+  const low = +last[3];
+  const close = +last[4];
+  const hl2 = (high + low) / 2;
+  const basicUpper = hl2 + multiplier * atr;
+  const basicLower = hl2 - multiplier * atr;
+  const prevClose = +klines.at(-2)[4];
+  let trend = 'Up';
+  if (close > basicUpper) trend = 'Up';
+  else if (close < basicLower) trend = 'Down';
+  else trend = (close > prevClose) ? 'Up' : 'Down';
+  return { trend, upperBand: basicUpper, lowerBand: basicLower };
+}
+
+async function analyzeSymbolPro(symbol, btc) {
+  const k = await getKlines(symbol, '1h', 200);
+  const closes = k.map(x => +x[4]);
+  const price = closes.at(-1);
+  const ema = calcEMA200(closes);
+  const rsi = calcRSI(closes);
+  const macd = calcMACD(closes);
+  const atr = calcATR(k);
+  const vwap = calcVWAP(k);
+  const direction = price > ema ? 'Long' : 'Short';
+  const bos = detectBOS(k);
+  const liq = detectLiquidity(k);
+  const pat = detectPatterns(k);
+  const ob = detectOrderBlocks(k, direction);
+  const fvg = detectFVG(k, direction);
+  const adxData = calcADX(k);
+  const bb = calcBollingerBands(closes);
+  const st = calcSupertrend(k);
+  let score = 0;
+  if (direction === 'Long') {
+    if (price > ema) score += 15;
+    if (macd.macd > 0) score += 10;
+    if (rsi > 50 && rsi < 70) score += 10;
+    if (bos.bullish) score += 15;
+    if (liq.sweepLow) score += 10;
+    if (price > vwap) score += 5;
+    if (pat.bullish) score += 5;
+    if (ob) score += 15;
+    if (fvg) score += 10;
+  } else {
+    if (price < ema) score += 15;
+    if (macd.macd < 0) score += 10;
+    if (rsi < 50 && rsi > 30) score += 10;
+    if (bos.bearish) score += 15;
+    if (liq.sweepHigh) score += 10;
+    if (price < vwap) score += 5;
+    if (pat.bearish) score += 5;
+    if (ob) score += 15;
+    if (fvg) score += 10;
+  }
+  if (btc.trend !== (direction === 'Long' ? 'Bearish' : 'Bullish')) score += 5;
+  if (adxData.adx > 25) score += 10;
+  if (direction === 'Long' && price <= bb.lower * 1.01) score += 5;
+  if (direction === 'Short' && price >= bb.upper * 0.99) score += 5;
+  if (st.trend === 'Up' && direction === 'Long') score += 10;
+  if (st.trend === 'Down' && direction === 'Short') score += 10;
+  const confirmed4h = await get4hConfirmation(symbol, direction);
+  if (confirmed4h) score += 10;
+  const entry = price;
+  const sl = calcSmartSL(k, direction, atr);
+  const targets = calcTargets(direction, entry, sl);
+  return {
+    symbol, direction, price, score,
+    grade: getSignalGrade(score),
+    entry,
+    tp1: targets.tp1, tp2: targets.tp2, tp3: targets.tp3,
+    sl, hasOB: !!ob, hasFVG: !!fvg, confirmed4h,
+    adx: adxData.adx, supertrend: st.trend,
+  };
+}
+
+function formatSignalPro(r) {
+  return `
+🔥 ${r.symbol} ${r.direction} (VIP)
+${r.grade}
+
+💰 Price: ${r.price}
+⭐ Score: ${r.score}/100
+✅ تأكيد 4 ساعات: ${r.confirmed4h ? 'نعم' : 'لا'}
+📦 Order Block: ${r.hasOB ? 'موجود' : 'لا'}
+📊 Fair Value Gap: ${r.hasFVG ? 'موجود' : 'لا'}
+📈 ADX (قوة الاتجاه): ${r.adx.toFixed(1)}
+🌀 Supertrend: ${r.supertrend}
+
+🎯 Entry: ${r.entry}
+🥇 TP1: ${r.tp1}
+🥈 TP2: ${r.tp2}
+🥉 TP3: ${r.tp3}
+🔴 SL: ${r.sl}
+
+💡 VIP SUPER SIGNAL
+`;
+}
+
+async function scanMarketPro() {
+  const btc = await getBTCTrend();
+  const results = [];
+  for (const s of SYMBOLS) {
+    try {
+      const r = await analyzeSymbolPro(s, btc);
+      if (r.score >= 60) results.push(r);
+    } catch (err) {
+      console.log('Skip Pro ' + s + ': ' + err.message);
+    }
+    await sleep(150);
+  }
+  return results.sort((a, b) => b.score - a.score);
+}
+
+async function backtestSymbolPro(symbol, candles = 600, forwardWindow = 40, step = 4, interval = '1h') {
+  const k1h = await getKlines(symbol, interval, candles);
+  const kBTC = await getKlines('BTCUSDT', interval, candles);
+  const results = [];
+  const minIndex = 210;
+  const maxIndex = k1h.length - forwardWindow - 1;
+  for (let i = minIndex; i < maxIndex; i += step) {
+    const slice = k1h.slice(0, i + 1);
+    const btcSlice = kBTC.slice(0, i + 1);
+    const closes = slice.map(x => +x[4]);
+    const btcCloses = btcSlice.map(x => +x[4]);
+    const price = closes.at(-1);
+    const ema = calcEMA200(closes);
+    const rsi = calcRSI(closes);
+    const macd = calcMACD(closes);
+    const atr = calcATR(slice);
+    const vwap = calcVWAP(slice);
+    const direction = price > ema ? 'Long' : 'Short';
+    const bos = detectBOS(slice);
+    const liq = detectLiquidity(slice);
+    const pat = detectPatterns(slice);
+    const ob = detectOrderBlocks(slice, direction);
+    const fvg = detectFVG(slice, direction);
+
+    const btcEma = calcEMA200(btcCloses);
+    const btcMacd = calcMACD(btcCloses);
+    let btcTrend = 'Neutral';
+    if (btcCloses.at(-1) > btcEma && btcMacd.macd > 0) btcTrend = 'Bullish';
+    if (btcCloses.at(-1) < btcEma && btcMacd.macd < 0) btcTrend = 'Bearish';
+
+    let score = 0;
+    if (direction === 'Long') {
+      if (price > ema) score += 15;
+      if (macd.macd > 0) score += 10;
+      if (rsi > 50 && rsi < 70) score += 10;
+      if (bos.bullish) score += 15;
+      if (liq.sweepLow) score += 10;
+      if (price > vwap) score += 5;
+      if (pat.bullish) score += 5;
+      if (ob) score += 15;
+      if (fvg) score += 10;
+    } else {
+      if (price < ema) score += 15;
+      if (macd.macd < 0) score += 10;
+      if (rsi < 50 && rsi > 30) score += 10;
+      if (bos.bearish) score += 15;
+      if (liq.sweepHigh) score += 10;
+      if (price < vwap) score += 5;
+      if (pat.bearish) score += 5;
+      if (ob) score += 15;
+      if (fvg) score += 10;
+    }
+    if (btcTrend !== (direction === 'Long' ? 'Bearish' : 'Bullish')) score += 5;
+
+    const adxData = calcADX(slice);
+    const bb = calcBollingerBands(closes);
+    const st = calcSupertrend(slice);
+    if (adxData.adx > 25) score += 10;
+    if (direction === 'Long' && price <= bb.lower * 1.01) score += 5;
+    if (direction === 'Short' && price >= bb.upper * 0.99) score += 5;
+    if (st.trend === 'Up' && direction === 'Long') score += 10;
+    if (st.trend === 'Down' && direction === 'Short') score += 10;
+
+    if (score < 60) continue;
+
+    const entry = price;
+    const sl = calcSmartSL(slice, direction, atr);
+    const targets = calcTargets(direction, entry, sl);
+
+    let outcome = 'none';
+    for (let j = i + 1; j <= i + forwardWindow && j < k1h.length; j++) {
+      const high = +k1h[j][2];
+      const low = +k1h[j][3];
+      if (direction === 'Long') {
+        if (low <= sl) { outcome = 'SL'; break; }
+        if (high >= targets.tp1) { outcome = 'TP1+'; break; }
+      } else {
+        if (high >= sl) { outcome = 'SL'; break; }
+        if (low <= targets.tp1) { outcome = 'TP1+'; break; }
+      }
+    }
+
+    results.push({ score, outcome });
+  }
+  return results;
+}
+
+bot.onText(/\/vip/, async (msg) => {
+  const userId = String(msg.from.id);
+  if (!ALLOWED_USERS.includes(userId)) return;
+  bot.sendMessage(msg.chat.id, '👑 جاري فحص السوق بنظام VIP (مع ADX + Bollinger + Supertrend)...');
+  try {
+    const res = await scanMarketPro();
+    if (res.length === 0) {
+      bot.sendMessage(msg.chat.id, 'مفيش فرص VIP قوية دلوقتي');
+    } else {
+      for (const r of res.slice(0, 5)) {
+        bot.sendMessage(msg.chat.id, formatSignalPro(r));
+      }
+    }
+  } catch (err) {
+    console.log('VIP SCAN ERROR:', err.message);
+    bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
+  }
+});
+
+bot.onText(/\/bestvip/, async (msg) => {
+  const userId = String(msg.from.id);
+  if (!ALLOWED_USERS.includes(userId)) return;
+  bot.sendMessage(msg.chat.id, '👑 جاري تحديد أفضل فرصة VIP...');
+  try {
+    const res = await scanMarketPro();
+    if (res.length === 0) {
+      bot.sendMessage(msg.chat.id, 'مفيش فرص VIP قوية دلوقتي');
+    } else {
+      bot.sendMessage(msg.chat.id, formatSignalPro(res[0]));
+    }
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
+  }
+});
+
+bot.onText(/\/backtestpro(?:\s+(.+))?/, async (msg, match) => {
+  const userId = String(msg.from.id);
+  if (!ALLOWED_USERS.includes(userId)) return;
+  const arg = match && match[1] ? match[1].trim().toUpperCase() : null;
+
+  if (arg) {
+    bot.sendMessage(msg.chat.id, '👑 جاري اختبار VIP لـ ' + arg + ' على آخر 3 شهور تقريباً...');
+    try {
+      const results = await backtestSymbolPro(arg, 540, 10, 2, '4h');
+      if (results.length === 0) {
+        bot.sendMessage(msg.chat.id, 'لم يتم العثور على إشارات VIP لعملة ' + arg);
+        return;
+      }
+      const report = buildReport(results, arg + ' VIP (آخر ~3 شهور)');
+      bot.sendMessage(msg.chat.id, report);
+    } catch (err) {
+      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
+    }
+  } else {
+    bot.sendMessage(msg.chat.id, '👑 جاري اختبار نظام VIP العام...');
+    try {
+      const testSymbols = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','LINKUSDT','LTCUSDT','UNIUSDT','ATOMUSDT','NEARUSDT','ARBUSDT'];
+      let allResults = [];
+      for (const s of testSymbols) {
+        try {
+          const r = await backtestSymbolPro(s);
+          allResults = allResults.concat(r);
+        } catch (e) {
+          console.log('Backtest Pro skip ' + s + ': ' + e.message);
+        }
+        await sleep(300);
+      }
+      const report = buildReport(allResults, 'VIP كل العملات');
+      bot.sendMessage(msg.chat.id, report);
+    } catch (err) {
+      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
+    }
+  }
+});
