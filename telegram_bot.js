@@ -425,3 +425,153 @@ bot.on('message', async (msg) => {
       'الأوامر المتاحة:\n🔍 مسح السوق - يفحص 300 عملة ويجيب الفرص (سكور 60+)\n🚀 أفضل الفرص - يجيب أقوى فرصة واحدة بس\nℹ️ المساعدة - الرسالة دي\n\nدرجات الإشارة:\n🟢 ممتازة (85+)\n🔵 جيدة جداً (75-84)\n🟡 جيدة (65-74)\n⚪ عادية (60-64)');
   }
 });
+async function backtestSymbol(symbol, candles = 600, forwardWindow = 40, step = 4, interval = '1h') {
+  const k1h = await getKlines(symbol, interval, candles);
+  const kBTC = await getKlines('BTCUSDT', interval, candles);
+  const results = [];
+  const minIndex = 210;
+  const maxIndex = k1h.length - forwardWindow - 1;
+  for (let i = minIndex; i < maxIndex; i += step) {
+    const slice = k1h.slice(0, i + 1);
+    const btcSlice = kBTC.slice(0, i + 1);
+    const closes = slice.map(x => +x[4]);
+    const btcCloses = btcSlice.map(x => +x[4]);
+    const price = closes.at(-1);
+    const ema = calcEMA200(closes);
+    const rsi = calcRSI(closes);
+    const macd = calcMACD(closes);
+    const atr = calcATR(slice);
+    const vwap = calcVWAP(slice);
+    const direction = price > ema ? 'Long' : 'Short';
+    const bos = detectBOS(slice);
+    const liq = detectLiquidity(slice);
+    const pat = detectPatterns(slice);
+    const ob = detectOrderBlocks(slice, direction);
+    const fvg = detectFVG(slice, direction);
+
+    const btcEma = calcEMA200(btcCloses);
+    const btcMacd = calcMACD(btcCloses);
+    let btcTrend = 'Neutral';
+    if (btcCloses.at(-1) > btcEma && btcMacd.macd > 0) btcTrend = 'Bullish';
+    if (btcCloses.at(-1) < btcEma && btcMacd.macd < 0) btcTrend = 'Bearish';
+
+    let score = 0;
+    if (direction === 'Long') {
+      if (price > ema) score += 15;
+      if (macd.macd > 0) score += 10;
+      if (rsi > 50 && rsi < 70) score += 10;
+      if (bos.bullish) score += 15;
+      if (liq.sweepLow) score += 10;
+      if (price > vwap) score += 5;
+      if (pat.bullish) score += 5;
+      if (ob) score += 15;
+      if (fvg) score += 10;
+    } else {
+      if (price < ema) score += 15;
+      if (macd.macd < 0) score += 10;
+      if (rsi < 50 && rsi > 30) score += 10;
+      if (bos.bearish) score += 15;
+      if (liq.sweepHigh) score += 10;
+      if (price < vwap) score += 5;
+      if (pat.bearish) score += 5;
+      if (ob) score += 15;
+      if (fvg) score += 10;
+    }
+    if (btcTrend !== (direction === 'Long' ? 'Bearish' : 'Bullish')) score += 5;
+
+    if (score < 60) continue;
+
+    const entry = price;
+    const sl = calcSmartSL(slice, direction, atr);
+    const targets = calcTargets(direction, entry, sl);
+
+    let outcome = 'none';
+    for (let j = i + 1; j <= i + forwardWindow && j < k1h.length; j++) {
+      const high = +k1h[j][2];
+      const low = +k1h[j][3];
+      if (direction === 'Long') {
+        if (low <= sl) { outcome = 'SL'; break; }
+        if (high >= targets.tp1) { outcome = 'TP1+'; break; }
+      } else {
+        if (high >= sl) { outcome = 'SL'; break; }
+        if (low <= targets.tp1) { outcome = 'TP1+'; break; }
+      }
+    }
+
+    results.push({ score, outcome });
+  }
+  return results;
+}
+
+function gradeLabel(score) {
+  if (score >= 85) return '🟢 85+';
+  if (score >= 75) return '🔵 75-84';
+  if (score >= 65) return '🟡 65-74';
+  return '⚪ 60-64';
+}
+
+function buildReport(allResults, label) {
+  const buckets = {};
+  for (const r of allResults) {
+    const g = gradeLabel(r.score);
+    if (!buckets[g]) buckets[g] = { win: 0, loss: 0, none: 0 };
+    if (r.outcome === 'TP1+') buckets[g].win++;
+    else if (r.outcome === 'SL') buckets[g].loss++;
+    else buckets[g].none++;
+  }
+
+  let report = '📊 نتائج اختبار الاستراتيجية - ' + label + '\n\n';
+  report += 'إجمالي الإشارات المختبرة: ' + allResults.length + '\n\n';
+  const order = ['🟢 85+', '🔵 75-84', '🟡 65-74', '⚪ 60-64'];
+  for (const g of order) {
+    const b = buckets[g];
+    if (!b) { report += g + ': لا توجد إشارات كافية\n\n'; continue; }
+    const total = b.win + b.loss;
+    const winRate = total > 0 ? ((b.win / total) * 100).toFixed(1) : '0';
+    report += g + '\n✅ نجح (وصل TP1): ' + b.win + '\n❌ فشل (ضرب SL): ' + b.loss + '\n⏳ لم يتحدد: ' + b.none + '\nنسبة النجاح: ' + winRate + '%\n\n';
+  }
+  report += '⚠️ ملاحظة: اختبار مبسط على بيانات محدودة، لا يضمن أداء مستقبلياً مماثلاً.';
+  return report;
+}
+
+bot.onText(/\/backtest(?:\s+(.+))?/, async (msg, match) => {
+  const userId = String(msg.from.id);
+  if (!ALLOWED_USERS.includes(userId)) return;
+  const arg = match && match[1] ? match[1].trim().toUpperCase() : null;
+
+  if (arg) {
+    bot.sendMessage(msg.chat.id, '📊 جاري اختبار ' + arg + ' على آخر 3 شهور تقريباً، هياخد دقيقة...');
+    try {
+      const results = await backtestSymbol(arg, 540, 10, 2, '4h');
+      if (results.length === 0) {
+        bot.sendMessage(msg.chat.id, 'لم يتم العثور على إشارات بسكور 60+ لعملة ' + arg + ' خلال آخر 3 شهور تقريباً.');
+        return;
+      }
+      const report = buildReport(results, arg + ' (آخر ~3 شهور)');
+      bot.sendMessage(msg.chat.id, report);
+    } catch (err) {
+      console.log('BACKTEST SYMBOL ERROR:', err.message);
+      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message + '\nتأكد من كتابة اسم العملة صحيح مثل BTCUSDT');
+    }
+  } else {
+    bot.sendMessage(msg.chat.id, '📊 جاري اختبار الاستراتيجية على بيانات تاريخية، هياخد دقيقة أو اتنين...');
+    try {
+      const testSymbols = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','LINKUSDT','LTCUSDT','UNIUSDT','ATOMUSDT','NEARUSDT','ARBUSDT'];
+      let allResults = [];
+      for (const s of testSymbols) {
+        try {
+          const r = await backtestSymbol(s);
+          allResults = allResults.concat(r);
+        } catch (e) {
+          console.log('Backtest skip ' + s + ': ' + e.message);
+        }
+        await sleep(300);
+      }
+      const report = buildReport(allResults, 'كل العملات (آخر ~25 يوم)');
+      bot.sendMessage(msg.chat.id, report);
+    } catch (err) {
+      console.log('BACKTEST ERROR:', err.message);
+      bot.sendMessage(msg.chat.id, '❌ حصل خطأ في الاختبار: ' + err.message);
+    }
+  }
+});
