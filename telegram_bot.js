@@ -1,55 +1,93 @@
-const TelegramBot = require('node-telegram-bot-api');
 const https = require('https');
+const TelegramBot = require('node-telegram-bot-api');
 
-const BOT_TOKEN = '8780661149:AAHwFEKncDPfJpPcms6SVYodOeHq03Gf2Lc';
+const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const BINANCE_API_KEY = process.env.BINANCE_API_KEY || '';
-const ALLOWED_USERS = ['5941806593'];
+const ALLOWED_USERS = (process.env.ALLOWED_USERS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const SETTINGS = {
+  interval: '1h',
+  klineLimit: 320,
+  scanDelayMs: 120,
+  minScore: 72,
+  emaFast: 21,
+  emaMid: 50,
+  emaSlow: 200,
+  adxLength: 14,
+  adxThreshold: 18,
+  atrLength: 14,
+  liquidityLookback: 30,
+  liquiditySweepLookback: 12,
+  liquidityToleranceAtr: 0.18,
+  minLiquidityTouches: 2,
+  breakoutLookback: 20,
+  breakoutBodyAtrMin: 0.40,
+  pullbackWindow: 6,
+  reclaimToleranceAtr: 0.35,
+  stopAtrMult: 1.60,
+  volumeMaLength: 20,
+  volumeMultiplier: 1.05,
+  minTrendSlopeBars: 3,
+  rr1: 1.0,
+  rr2: 2.0,
+  rr3: 3.0,
+  maxSignalAgeBars: 1,
+  topScanCount: 5,
+};
+
+const SYMBOLS = (process.env.SYMBOLS || [
+  'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','LINKUSDT',
+  'LTCUSDT','BCHUSDT','UNIUSDT','ATOMUSDT','NEARUSDT','APTUSDT','ARBUSDT','OPUSDT','INJUSDT','SUIUSDT',
+  'TIAUSDT','SEIUSDT','RUNEUSDT','AAVEUSDT','MKRUSDT','LDOUSDT','CRVUSDT','DYDXUSDT','ENSUSDT','IMXUSDT',
+  'TRXUSDT','TONUSDT','ICPUSDT','HBARUSDT','ETCUSDT','FILUSDT','XLMUSDT','RNDRUSDT','PEPEUSDT','WIFUSDT'
+].join(','))
+  .split(',')
+  .map(s => s.trim().toUpperCase())
+  .filter(Boolean);
 
 const mainKeyboard = {
   reply_markup: {
     keyboard: [
-      ['🔍 مسح السوق', '🚀 أفضل الفرص'],
-      ['ℹ️ المساعدة']
+      ['🔍 مسح السوق', '🚀 أفضل فرصة'],
+      ['💧 السيولة الآن', 'ℹ️ المساعدة']
     ],
     resize_keyboard: true
   }
 };
 
-console.log('VIP AI BOT RUNNING');
-
-bot.on('polling_error', (err) => {
-  console.log('POLLING ERROR:', err.code, err.message);
-});
+function isAllowed(userId) {
+  if (!ALLOWED_USERS.length) return true;
+  return ALLOWED_USERS.includes(String(userId));
+}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function getKlines(symbol, interval = '1h', limit = 300) {
+function requestJson(hostname, path, timeout = 10000) {
   return new Promise((resolve, reject) => {
-    const path = `/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const options = {
-      hostname: 'api.binance.com',
+    const req = https.request({
+      hostname,
       path,
       method: 'GET',
-      headers: { 'X-MBX-APIKEY': BINANCE_API_KEY },
-      timeout: 8000,
-    };
-    const req = https.request(options, (res) => {
+      timeout,
+      headers: {
+        'X-MBX-APIKEY': BINANCE_API_KEY,
+        'User-Agent': 'Mozilla/5.0'
+      }
+    }, (res) => {
       let data = '';
-      res.on('data', c => data += c);
+      res.on('data', chunk => data += chunk);
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
-          if (!Array.isArray(parsed)) {
-            reject(new Error('Invalid symbol'));
-          } else {
-            resolve(parsed);
+          if (res.statusCode >= 400) {
+            reject(new Error(parsed.msg || ('HTTP ' + res.statusCode)));
+            return;
           }
-        } catch (e) {
-          reject(e);
+          resolve(parsed);
+        } catch (err) {
+          reject(err);
         }
       });
     });
@@ -62,824 +100,634 @@ async function getKlines(symbol, interval = '1h', limit = 300) {
   });
 }
 
-function calcEMA(closes, period) {
+async function getKlines(symbol, interval = SETTINGS.interval, limit = SETTINGS.klineLimit) {
+  const path = `/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+  const data = await requestJson('api.binance.com', path);
+  if (!Array.isArray(data) || data.length < 50) {
+    throw new Error('Invalid kline data for ' + symbol);
+  }
+  return data;
+}
+
+function toCandles(klines) {
+  return klines.slice(0, -1).map(k => ({
+    openTime: +k[0],
+    open: +k[1],
+    high: +k[2],
+    low: +k[3],
+    close: +k[4],
+    volume: +k[5],
+    closeTime: +k[6],
+  }));
+}
+
+function emaSeries(values, period) {
+  const out = new Array(values.length).fill(null);
+  if (!values.length) return out;
   const k = 2 / (period + 1);
-  let ema = closes[0];
-  for (let i = 1; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
-  }
-  return ema;
-}
-
-function calcEMA200(closes) {
-  return calcEMA(closes, 200);
-}
-
-function calcRSI(closes, period = 14) {
-  let gain = 0, loss = 0;
-  for (let i = closes.length - period; i < closes.length; i++) {
-    const diff = closes[i] - closes[i - 1];
-    if (diff > 0) gain += diff;
-    else loss += Math.abs(diff);
-  }
-  const rs = gain / (loss || 1);
-  return 100 - (100 / (1 + rs));
-}
-
-function calcMACD(closes) {
-  const ema12 = calcEMA(closes, 12);
-  const ema26 = calcEMA(closes, 26);
-  return { macd: ema12 - ema26 };
-}
-
-function calcATR(klines, period = 14) {
-  const trs = [];
-  for (let i = 1; i < klines.length; i++) {
-    const h = +klines[i][2];
-    const l = +klines[i][3];
-    const pc = +klines[i - 1][4];
-    trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
-  }
-  return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
-}
-
-function calcVWAP(klines) {
-  let tpv = 0, vol = 0;
-  klines.slice(-24).forEach(k => {
-    const tp = (+k[2] + +k[3] + +k[4]) / 3;
-    tpv += tp * +k[5];
-    vol += +k[5];
-  });
-  return tpv / vol;
-}
-
-async function getBTCTrend() {
-  const k = await getKlines('BTCUSDT', '1h', 250);
-  const closes = k.map(x => +x[4]);
-  const price = closes.at(-1);
-  const ema = calcEMA200(closes);
-  const macd = calcMACD(closes);
-  let trend = 'Neutral';
-  if (price > ema && macd.macd > 0) trend = 'Bullish';
-  if (price < ema && macd.macd < 0) trend = 'Bearish';
-  return { trend, price };
-}
-function detectSwingHighs(klines, lb = 3) {
-  const h = klines.map(k => +k[2]);
-  const out = [];
-  for (let i = lb; i < h.length - lb; i++) {
-    let ok = true;
-    for (let j = 1; j <= lb; j++) {
-      if (h[i] <= h[i - j] || h[i] <= h[i + j]) ok = false;
-    }
-    if (ok) out.push({ index: i, price: h[i] });
+  let ema = values[0];
+  out[0] = ema;
+  for (let i = 1; i < values.length; i++) {
+    ema = values[i] * k + ema * (1 - k);
+    out[i] = ema;
   }
   return out;
 }
 
-function detectSwingLows(klines, lb = 3) {
-  const l = klines.map(k => +k[3]);
-  const out = [];
-  for (let i = lb; i < l.length - lb; i++) {
-    let ok = true;
-    for (let j = 1; j <= lb; j++) {
-      if (l[i] >= l[i - j] || l[i] >= l[i + j]) ok = false;
-    }
-    if (ok) out.push({ index: i, price: l[i] });
+function smaAt(values, endIndex, period) {
+  if (endIndex - period + 1 < 0) return null;
+  let sum = 0;
+  for (let i = endIndex - period + 1; i <= endIndex; i++) sum += values[i];
+  return sum / period;
+}
+
+function atrSeries(candles, period = 14) {
+  const tr = new Array(candles.length).fill(null);
+  const atr = new Array(candles.length).fill(null);
+  for (let i = 1; i < candles.length; i++) {
+    tr[i] = Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low - candles[i - 1].close)
+    );
   }
-  return out;
-}
-
-function detectBOS(klines) {
-  const highs = detectSwingHighs(klines);
-  const lows = detectSwingLows(klines);
-  const price = +klines.at(-1)[4];
-  const lastSwingHigh = highs.length ? highs[highs.length - 1].price : price;
-  const lastSwingLow = lows.length ? lows[lows.length - 1].price : price;
-  return {
-    bullish: price > lastSwingHigh,
-    bearish: price < lastSwingLow,
-    lastSwingHigh,
-    lastSwingLow,
-  };
-}
-
-function detectLiquidity(klines) {
-  const highs = klines.map(k => +k[2]);
-  const lows = klines.map(k => +k[3]);
-  const recentHighs = highs.slice(-15, -1);
-  const recentLows = lows.slice(-15, -1);
-  return {
-    sweepHigh: highs.at(-1) > Math.max(...recentHighs),
-    sweepLow: lows.at(-1) < Math.min(...recentLows),
-  };
-}
-
-function detectPatterns(klines) {
-  const o = +klines.at(-1)[1];
-  const c = +klines.at(-1)[4];
-  return { bullish: c > o, bearish: c < o };
-}
-
-function detectOrderBlocks(klines, direction) {
-  const recent = klines.slice(-30);
-  let found = null;
-  for (let i = recent.length - 3; i > 0; i--) {
-    const o = +recent[i][1];
-    const c = +recent[i][4];
-    const nextC = +recent[i + 1][4];
-    const nextO = +recent[i + 1][1];
-    const moveSize = Math.abs(nextC - nextO);
-    const avgRange = +recent[i][2] - +recent[i][3];
-    if (direction === 'Long' && c < o && nextC > nextO && moveSize > avgRange * 1.5) {
-      found = { high: +recent[i][2], low: +recent[i][3] };
-      break;
-    }
-    if (direction === 'Short' && c > o && nextC < nextO && moveSize > avgRange * 1.5) {
-      found = { high: +recent[i][2], low: +recent[i][3] };
-      break;
-    }
+  let seed = 0;
+  for (let i = 1; i <= period && i < tr.length; i++) seed += tr[i] || 0;
+  if (tr.length > period) atr[period] = seed / period;
+  for (let i = period + 1; i < tr.length; i++) {
+    atr[i] = ((atr[i - 1] * (period - 1)) + (tr[i] || 0)) / period;
   }
-  return found;
+  return atr;
 }
 
-function detectFVG(klines, direction) {
-  const recent = klines.slice(-20);
-  let found = null;
-  for (let i = recent.length - 3; i >= 0; i--) {
-    const candle1High = +recent[i][2];
-    const candle1Low = +recent[i][3];
-    const candle3High = +recent[i + 2][2];
-    const candle3Low = +recent[i + 2][3];
-    if (direction === 'Long' && candle3Low > candle1High) {
-      found = { top: candle3Low, bottom: candle1High };
-      break;
+function adxSeries(candles, period = 14) {
+  const plusDM = new Array(candles.length).fill(0);
+  const minusDM = new Array(candles.length).fill(0);
+  const tr = new Array(candles.length).fill(0);
+  const plusDI = new Array(candles.length).fill(null);
+  const minusDI = new Array(candles.length).fill(null);
+  const dx = new Array(candles.length).fill(null);
+  const adx = new Array(candles.length).fill(null);
+
+  for (let i = 1; i < candles.length; i++) {
+    const upMove = candles[i].high - candles[i - 1].high;
+    const downMove = candles[i - 1].low - candles[i].low;
+    plusDM[i] = upMove > downMove && upMove > 0 ? upMove : 0;
+    minusDM[i] = downMove > upMove && downMove > 0 ? downMove : 0;
+    tr[i] = Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low - candles[i - 1].close)
+    );
+  }
+
+  let trSum = 0, plusSum = 0, minusSum = 0;
+  for (let i = 1; i <= period && i < candles.length; i++) {
+    trSum += tr[i];
+    plusSum += plusDM[i];
+    minusSum += minusDM[i];
+  }
+
+  for (let i = period + 1; i < candles.length; i++) {
+    trSum = trSum - (trSum / period) + tr[i];
+    plusSum = plusSum - (plusSum / period) + plusDM[i];
+    minusSum = minusSum - (minusSum / period) + minusDM[i];
+    plusDI[i] = trSum === 0 ? 0 : (plusSum / trSum) * 100;
+    minusDI[i] = trSum === 0 ? 0 : (minusSum / trSum) * 100;
+    dx[i] = (plusDI[i] + minusDI[i]) === 0 ? 0 : (Math.abs(plusDI[i] - minusDI[i]) / (plusDI[i] + minusDI[i])) * 100;
+  }
+
+  const firstAdxIndex = period * 2;
+  if (candles.length > firstAdxIndex) {
+    let dxSeed = 0, count = 0;
+    for (let i = period + 1; i <= firstAdxIndex && i < dx.length; i++) {
+      if (dx[i] !== null) { dxSeed += dx[i]; count++; }
     }
-    if (direction === 'Short' && candle3High < candle1Low) {
-      found = { top: candle1Low, bottom: candle3High };
-      break;
+    if (count > 0) adx[firstAdxIndex] = dxSeed / count;
+    for (let i = firstAdxIndex + 1; i < dx.length; i++) {
+      adx[i] = ((adx[i - 1] * (period - 1)) + (dx[i] || 0)) / period;
     }
   }
-  return found;
-}
-function calcSR(klines) {
-  const swingHighs = detectSwingHighs(klines, 3).map(h => h.price);
-  const swingLows = detectSwingLows(klines, 3).map(l => l.price);
-  const price = +klines.at(-1)[4];
-  const resistances = swingHighs.filter(h => h > price).sort((a, b) => a - b);
-  const supports = swingLows.filter(l => l < price).sort((a, b) => b - a);
-  const r1 = resistances[0] || price * 1.02;
-  const s1 = supports[0] || price * 0.98;
-  return { r1, s1, price };
+  return { adx, plusDI, minusDI };
 }
 
-function calcSmartSL(klines, direction, atr) {
-  const swingHighs = detectSwingHighs(klines, 3).map(h => h.price);
-  const swingLows = detectSwingLows(klines, 3).map(l => l.price);
-  const price = +klines.at(-1)[4];
-  if (direction === 'Long') {
-    const below = swingLows.filter(l => l < price).sort((a, b) => b - a);
-    const structureSL = below[0] || (price - atr);
-    return structureSL - atr * 0.3;
-  } else {
-    const above = swingHighs.filter(h => h > price).sort((a, b) => a - b);
-    const structureSL = above[0] || (price + atr);
-    return structureSL + atr * 0.3;
+function highest(values, start, end) {
+  let max = -Infinity;
+  for (let i = start; i <= end; i++) if (values[i] > max) max = values[i];
+  return max;
+}
+
+function lowest(values, start, end) {
+  let min = Infinity;
+  for (let i = start; i <= end; i++) if (values[i] < min) min = values[i];
+  return min;
+}
+
+function countTouches(level, values, start, end, tolerance) {
+  let touches = 0;
+  for (let i = start; i <= end; i++) {
+    if (Math.abs(values[i] - level) <= tolerance) touches++;
   }
+  return touches;
 }
 
-function calcTargets(direction, entry, sl) {
-  const risk = Math.abs(entry - sl);
-  if (direction === 'Long') {
-    return { tp1: entry + risk * 1, tp2: entry + risk * 2, tp3: entry + risk * 3 };
-  } else {
-    return { tp1: entry - risk * 1, tp2: entry - risk * 2, tp3: entry - risk * 3 };
+function getLiquidityState(candles, atr, index, cfg = SETTINGS) {
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const closes = candles.map(c => c.close);
+  const lbStart = Math.max(0, index - cfg.liquidityLookback);
+  const sweepStart = Math.max(0, index - cfg.liquiditySweepLookback);
+  const atrNow = atr[index] || 0;
+  const tol = Math.max(atrNow * cfg.liquidityToleranceAtr, closes[index] * 0.0015);
+  const liquidityHigh = highest(highs, lbStart, index - 1);
+  const liquidityLow = lowest(lows, lbStart, index - 1);
+  const highTouches = countTouches(liquidityHigh, highs, lbStart, index - 1, tol);
+  const lowTouches = countTouches(liquidityLow, lows, lbStart, index - 1, tol);
+  const prevSweepHigh = highest(highs, sweepStart, index - 1);
+  const prevSweepLow = lowest(lows, sweepStart, index - 1);
+  const candle = candles[index];
+  const prevClose = index > 0 ? candles[index - 1].close : candle.close;
+  const candleRange = Math.max(0.0000001, candle.high - candle.low);
+  const upperWick = candle.high - Math.max(candle.open, candle.close);
+  const lowerWick = Math.min(candle.open, candle.close) - candle.low;
+  const sweepHigh = candle.high > prevSweepHigh + tol;
+  const sweepLow = candle.low < prevSweepLow - tol;
+  const rejectFromHigh = sweepHigh && candle.close < prevSweepHigh && upperWick / candleRange >= 0.25;
+  const rejectFromLow = sweepLow && candle.close > prevSweepLow && lowerWick / candleRange >= 0.25;
+  let bias = 'Neutral';
+  let note = 'No clear liquidity event';
+  if (rejectFromLow && lowTouches >= cfg.minLiquidityTouches) {
+    bias = 'Liquidity Below Swept → Up';
+    note = 'Swept sell-side liquidity below prior lows then reclaimed back up';
+  } else if (rejectFromHigh && highTouches >= cfg.minLiquidityTouches) {
+    bias = 'Liquidity Above Swept → Down';
+    note = 'Swept buy-side liquidity above prior highs then rejected back down';
+  } else if (candle.close > liquidityHigh && candle.close > prevClose) {
+    bias = 'Liquidity Grab Upstream';
+    note = 'Accepted above liquidity high; momentum may continue upward';
+  } else if (candle.close < liquidityLow && candle.close < prevClose) {
+    bias = 'Liquidity Grab Downstream';
+    note = 'Accepted below liquidity low; momentum may continue downward';
   }
+  return { liquidityHigh, liquidityLow, highTouches, lowTouches, sweepHigh, sweepLow, rejectFromHigh, rejectFromLow, bias, note };
 }
 
-function getSignalGrade(score) {
-  if (score >= 85) return '🟢 ممتازة';
-  if (score >= 75) return '🔵 جيدة جداً';
-  if (score >= 65) return '🟡 جيدة';
-  return '⚪ عادية';
+function recentSwingLow(candles, endIndex, lookback = 10) {
+  let min = Infinity;
+  const start = Math.max(0, endIndex - lookback + 1);
+  for (let i = start; i <= endIndex; i++) if (candles[i].low < min) min = candles[i].low;
+  return min;
 }
 
-async function get4hConfirmation(symbol, direction) {
-  try {
-    const k = await getKlines(symbol, '4h', 100);
-    const closes = k.map(x => +x[4]);
-    const price = closes.at(-1);
-    const ema = calcEMA(closes, Math.min(50, closes.length - 1));
-    const macd = calcMACD(closes);
-    if (direction === 'Long') {
-      return price > ema && macd.macd > 0;
-    } else {
-      return price < ema && macd.macd < 0;
+function recentSwingHigh(candles, endIndex, lookback = 10) {
+  let max = -Infinity;
+  const start = Math.max(0, endIndex - lookback + 1);
+  for (let i = start; i <= endIndex; i++) if (candles[i].high > max) max = candles[i].high;
+  return max;
+}
+
+function getTargets(side, entry, stopLoss) {
+  const risk = Math.abs(entry - stopLoss);
+  if (risk <= 0) return null;
+  if (side === 'Long') {
+    return { tp1: entry + risk * SETTINGS.rr1, tp2: entry + risk * SETTINGS.rr2, tp3: entry + risk * SETTINGS.rr3, risk };
+  }
+  return { tp1: entry - risk * SETTINGS.rr1, tp2: entry - risk * SETTINGS.rr2, tp3: entry - risk * SETTINGS.rr3, risk };
+}
+
+function getGrade(score) {
+  if (score >= 90) return '🟢 ممتازة جداً';
+  if (score >= 82) return '🔵 قوية';
+  if (score >= 72) return '🟡 جيدة';
+  return '⚪ ضعيفة';
+  
+}function buildSignals(candles) {
+  if (candles.length < 260) throw new Error('Need at least 260 closed candles');
+  const closes = candles.map(c => c.close);
+  const opens = candles.map(c => c.open);
+  const highs = candles.map(c => c.high);
+  const lows = candles.map(c => c.low);
+  const volumes = candles.map(c => c.volume);
+  const emaFast = emaSeries(closes, SETTINGS.emaFast);
+  const emaMid = emaSeries(closes, SETTINGS.emaMid);
+  const emaSlow = emaSeries(closes, SETTINGS.emaSlow);
+  const atr = atrSeries(candles, SETTINGS.atrLength);
+  const { adx } = adxSeries(candles, SETTINGS.adxLength);
+  const signals = [];
+  let pendingLong = null;
+  let pendingShort = null;
+
+  for (let i = 0; i < candles.length; i++) {
+    const body = Math.abs(closes[i] - opens[i]);
+    const volumeMa = smaAt(volumes, i, SETTINGS.volumeMaLength);
+    const volumeOk = volumeMa === null ? true : volumes[i] >= volumeMa * SETTINGS.volumeMultiplier;
+    const trendLong = (
+      emaFast[i] !== null && emaMid[i] !== null && emaSlow[i] !== null && adx[i] !== null &&
+      emaFast[i] > emaMid[i] && emaMid[i] > emaSlow[i] &&
+      emaFast[i] > (emaFast[Math.max(0, i - SETTINGS.minTrendSlopeBars)] || -Infinity) &&
+      adx[i] >= SETTINGS.adxThreshold
+    );
+    const trendShort = (
+      emaFast[i] !== null && emaMid[i] !== null && emaSlow[i] !== null && adx[i] !== null &&
+      emaFast[i] < emaMid[i] && emaMid[i] < emaSlow[i] &&
+      emaFast[i] < (emaFast[Math.max(0, i - SETTINGS.minTrendSlopeBars)] || Infinity) &&
+      adx[i] >= SETTINGS.adxThreshold
+    );
+    const dcStart = Math.max(0, i - SETTINGS.breakoutLookback);
+    const dcHigh = i > 0 ? highest(highs, dcStart, i - 1) : null;
+    const dcLow = i > 0 ? lowest(lows, dcStart, i - 1) : null;
+    const breakoutLong = trendLong && dcHigh !== null && atr[i] !== null && closes[i] > dcHigh && body >= atr[i] * SETTINGS.breakoutBodyAtrMin && volumeOk;
+    const breakoutShort = trendShort && dcLow !== null && atr[i] !== null && closes[i] < dcLow && body >= atr[i] * SETTINGS.breakoutBodyAtrMin && volumeOk;
+    const liq = i > SETTINGS.liquidityLookback ? getLiquidityState(candles, atr, i) : null;
+
+    let signal = {
+      side: 'flat', score: 0, grade: '⚪ ضعيفة',
+      entry: null, stopLoss: null, tp1: null, tp2: null, tp3: null,
+      breakoutLevel: null, signalIndex: i,
+      liquidityBias: liq ? liq.bias : 'Neutral',
+      liquidityNote: liq ? liq.note : 'No liquidity context yet',
+      liquidityHigh: liq ? liq.liquidityHigh : null,
+      liquidityLow: liq ? liq.liquidityLow : null,
+      adx: adx[i], reason: 'No signal',
+    };
+
+    if (pendingLong) {
+      const age = i - pendingLong.index;
+      const tolerance = (atr[i] || 0) * SETTINGS.reclaimToleranceAtr;
+      const retest = candles[i].low <= (pendingLong.level + tolerance);
+      const reclaim = candles[i].close > candles[i].open && candles[i].close > pendingLong.level && candles[i].close > (emaFast[i] || 0);
+      const liqOk = liq && (liq.rejectFromLow || liq.bias === 'Liquidity Below Swept → Up' || liq.bias === 'Liquidity Grab Upstream');
+      if (age >= 1 && age <= SETTINGS.pullbackWindow && retest && reclaim && trendLong && liqOk) {
+        const breakoutStop = pendingLong.level - ((atr[i] || 0) * SETTINGS.stopAtrMult);
+        const structureStop = recentSwingLow(candles, i, 10);
+        const stopLoss = Math.min(breakoutStop, structureStop);
+        const targets = getTargets('Long', candles[i].close, stopLoss);
+        if (targets) {
+          let score = 58;
+          if (liq.rejectFromLow) score += 18;
+          else if (liq.bias === 'Liquidity Grab Upstream') score += 10;
+          if ((adx[i] || 0) >= SETTINGS.adxThreshold + 5) score += 8;
+          if (volumeOk) score += 6;
+          if (pendingLong.breakoutBody >= (pendingLong.atr * 0.60)) score += 5;
+          if (candles[i].close > pendingLong.level) score += 5;
+          signal = {
+            side: 'Long', score: Math.min(100, score), grade: getGrade(Math.min(100, score)),
+            entry: candles[i].close, stopLoss,
+            tp1: targets.tp1, tp2: targets.tp2, tp3: targets.tp3,
+            breakoutLevel: pendingLong.level, signalIndex: i,
+            liquidityBias: liq.bias, liquidityNote: liq.note,
+            liquidityHigh: liq.liquidityHigh, liquidityLow: liq.liquidityLow,
+            adx: adx[i], reason: 'Trend up + breakout + pullback reclaim + sell-side liquidity sweep',
+          };
+        }
+        pendingLong = null;
+      } else if (age > SETTINGS.pullbackWindow || !trendLong) {
+        pendingLong = null;
+      }
     }
-  } catch (e) {
-    return false;
+
+    if (pendingShort) {
+      const age = i - pendingShort.index;
+      const tolerance = (atr[i] || 0) * SETTINGS.reclaimToleranceAtr;
+      const retest = candles[i].high >= (pendingShort.level - tolerance);
+      const reclaim = candles[i].close < candles[i].open && candles[i].close < pendingShort.level && candles[i].close < (emaFast[i] || Infinity);
+      const liqOk = liq && (liq.rejectFromHigh || liq.bias === 'Liquidity Above Swept → Down' || liq.bias === 'Liquidity Grab Downstream');
+      if (age >= 1 && age <= SETTINGS.pullbackWindow && retest && reclaim && trendShort && liqOk) {
+        const breakoutStop = pendingShort.level + ((atr[i] || 0) * SETTINGS.stopAtrMult);
+        const structureStop = recentSwingHigh(candles, i, 10);
+        const stopLoss = Math.max(breakoutStop, structureStop);
+        const targets = getTargets('Short', candles[i].close, stopLoss);
+        if (targets) {
+          let score = 58;
+          if (liq.rejectFromHigh) score += 18;
+          else if (liq.bias === 'Liquidity Grab Downstream') score += 10;
+          if ((adx[i] || 0) >= SETTINGS.adxThreshold + 5) score += 8;
+          if (volumeOk) score += 6;
+          if (pendingShort.breakoutBody >= (pendingShort.atr * 0.60)) score += 5;
+          if (candles[i].close < pendingShort.level) score += 5;
+          signal = {
+            side: 'Short', score: Math.min(100, score), grade: getGrade(Math.min(100, score)),
+            entry: candles[i].close, stopLoss,
+            tp1: targets.tp1, tp2: targets.tp2, tp3: targets.tp3,
+            breakoutLevel: pendingShort.level, signalIndex: i,
+            liquidityBias: liq.bias, liquidityNote: liq.note,
+            liquidityHigh: liq.liquidityHigh, liquidityLow: liq.liquidityLow,
+            adx: adx[i], reason: 'Trend down + breakout + pullback reclaim + buy-side liquidity sweep',
+          };
+        }
+        pendingShort = null;
+      } else if (age > SETTINGS.pullbackWindow || !trendShort) {
+        pendingShort = null;
+      }
+    }
+
+    if (breakoutLong) {
+      pendingLong = { index: i, level: dcHigh, atr: atr[i] || 0, breakoutBody: body };
+      pendingShort = null;
+    }
+    if (breakoutShort) {
+      pendingShort = { index: i, level: dcLow, atr: atr[i] || 0, breakoutBody: body };
+      pendingLong = null;
+    }
+    signals.push(signal);
   }
+  return { signals, emaFast, emaMid, emaSlow, atr, adx };
+}
+
+function getRegime(candles) {
+  const closes = candles.map(c => c.close);
+  const ema50 = emaSeries(closes, 50);
+  const ema200 = emaSeries(closes, 200);
+  const { adx } = adxSeries(candles, SETTINGS.adxLength);
+  const i = candles.length - 1;
+  if (closes[i] > ema50[i] && ema50[i] > ema200[i] && (adx[i] || 0) >= 16) return 'Bullish';
+  if (closes[i] < ema50[i] && ema50[i] < ema200[i] && (adx[i] || 0) >= 16) return 'Bearish';
+  return 'Neutral';
+}
+
+async function getBTCRegime() {
+  const raw = await getKlines('BTCUSDT');
+  const candles = toCandles(raw);
+  return { regime: getRegime(candles), price: candles.at(-1).close };
+}
+
+async function getHigherTimeframeRegime(symbol) {
+  const raw = await getKlines(symbol, '4h', 280);
+  const candles = toCandles(raw);
+  return getRegime(candles);
 }
 
 async function analyzeSymbol(symbol, btc) {
-  const k = await getKlines(symbol, '1h', 200);
-  const closes = k.map(x => +x[4]);
-  const price = closes.at(-1);
-  const ema = calcEMA200(closes);
-  const rsi = calcRSI(closes);
-  const macd = calcMACD(closes);
-  const atr = calcATR(k);
-  const vwap = calcVWAP(k);
-  const direction = price > ema ? 'Long' : 'Short';
-  const bos = detectBOS(k);
-  const liq = detectLiquidity(k);
-  const pat = detectPatterns(k);
-  const ob = detectOrderBlocks(k, direction);
-  const fvg = detectFVG(k, direction);
-  let score = 0;
-  if (direction === 'Long') {
-    if (price > ema) score += 15;
-    if (macd.macd > 0) score += 10;
-    if (rsi > 50 && rsi < 70) score += 10;
-    if (bos.bullish) score += 15;
-    if (liq.sweepLow) score += 10;
-    if (price > vwap) score += 5;
-    if (pat.bullish) score += 5;
-    if (ob) score += 15;
-    if (fvg) score += 10;
-  } else {
-    if (price < ema) score += 15;
-    if (macd.macd < 0) score += 10;
-    if (rsi < 50 && rsi > 30) score += 10;
-    if (bos.bearish) score += 15;
-    if (liq.sweepHigh) score += 10;
-    if (price < vwap) score += 5;
-    if (pat.bearish) score += 5;
-    if (ob) score += 15;
-    if (fvg) score += 10;
+  const raw = await getKlines(symbol);
+  const candles = toCandles(raw);
+  const built = buildSignals(candles);
+  const latest = built.signals.at(-1);
+  const prev = built.signals.at(-2);
+  const signal = latest && latest.side !== 'flat' ? latest : prev;
+  const atrNow = built.atr.at(-1) || 0;
+  const liqNow = getLiquidityState(candles, built.atr, candles.length - 1);
+
+  if (!signal || signal.side === 'flat') {
+    return { symbol, side: 'flat', score: 0, liquidityBias: liqNow.bias, liquidityNote: liqNow.note, liquidityHigh: liqNow.liquidityHigh, liquidityLow: liqNow.liquidityLow, atr: atrNow, reason: 'No valid signal' };
   }
-  if (btc.trend !== (direction === 'Long' ? 'Bearish' : 'Bullish')) score += 5;
-  const confirmed4h = await get4hConfirmation(symbol, direction);
-  if (confirmed4h) score += 10;
-  const entry = price;
-  const sl = calcSmartSL(k, direction, atr);
-  const targets = calcTargets(direction, entry, sl);
+
+  const age = (built.signals.length - 1) - signal.signalIndex;
+  if (age > SETTINGS.maxSignalAgeBars) {
+    return { symbol, side: 'flat', score: 0, liquidityBias: liqNow.bias, liquidityNote: liqNow.note, liquidityHigh: liqNow.liquidityHigh, liquidityLow: liqNow.liquidityLow, atr: atrNow, reason: 'Signal too old' };
+  }
+
+  const htfRegime = await getHigherTimeframeRegime(symbol);
+  let finalScore = signal.score;
+  const wantsBull = signal.side === 'Long';
+
+  if (symbol !== 'BTCUSDT') {
+    if ((wantsBull && btc.regime === 'Bullish') || (!wantsBull && btc.regime === 'Bearish')) finalScore += 8;
+    else if (btc.regime !== 'Neutral') finalScore -= 10;
+  }
+  if ((wantsBull && htfRegime === 'Bullish') || (!wantsBull && htfRegime === 'Bearish')) finalScore += 10;
+  else if (htfRegime !== 'Neutral') finalScore -= 12;
+
+  finalScore = Math.max(0, Math.min(100, finalScore));
+
+  if (finalScore < SETTINGS.minScore) {
+    return { symbol, side: 'flat', score: finalScore, liquidityBias: liqNow.bias, liquidityNote: liqNow.note, liquidityHigh: liqNow.liquidityHigh, liquidityLow: liqNow.liquidityLow, atr: atrNow, reason: 'Below threshold' };
+  }
+
   return {
-    symbol, direction, price, score,
-    grade: getSignalGrade(score),
-    entry,
-    tp1: targets.tp1, tp2: targets.tp2, tp3: targets.tp3,
-    sl, hasOB: !!ob, hasFVG: !!fvg, confirmed4h,
+    symbol, side: signal.side, score: finalScore, grade: getGrade(finalScore),
+    price: candles.at(-1).close, entry: signal.entry, stopLoss: signal.stopLoss,
+    tp1: signal.tp1, tp2: signal.tp2, tp3: signal.tp3,
+    breakoutLevel: signal.breakoutLevel, signalAgeBars: age, adx: signal.adx || 0,
+    btcRegime: btc.regime, htfRegime,
+    liquidityBias: signal.liquidityBias, liquidityNote: signal.liquidityNote,
+    liquidityHigh: signal.liquidityHigh, liquidityLow: signal.liquidityLow,
+    atr: atrNow, reason: signal.reason,
   };
 }
+
 function formatSignal(r) {
-  return `
-🔥 ${r.symbol} ${r.direction}
-${r.grade}
-
-💰 Price: ${r.price}
-⭐ Score: ${r.score}/100
-✅ تأكيد 4 ساعات: ${r.confirmed4h ? 'نعم' : 'لا'}
-📦 Order Block: ${r.hasOB ? 'موجود' : 'لا'}
-📊 Fair Value Gap: ${r.hasFVG ? 'موجود' : 'لا'}
-
-🎯 Entry: ${r.entry}
-🥇 TP1: ${r.tp1}
-🥈 TP2: ${r.tp2}
-🥉 TP3: ${r.tp3}
-🔴 SL: ${r.sl}
-
-💡 VIP AI SIGNAL
-`;
+  return [
+    '🔥 ' + r.symbol + ' ' + r.side,
+    r.grade, '',
+    '💰 السعر: ' + r.price.toFixed(6),
+    '⭐ السكور: ' + r.score + '/100',
+    '📈 ADX: ' + (r.adx || 0).toFixed(1),
+    '₿ اتجاه BTC: ' + r.btcRegime,
+    '🕓 اتجاه 4H: ' + r.htfRegime,
+    '💧 اتجاه السيولة: ' + r.liquidityBias,
+    '📍 Liquidity High: ' + (r.liquidityHigh ? r.liquidityHigh.toFixed(6) : '-'),
+    '📍 Liquidity Low: ' + (r.liquidityLow ? r.liquidityLow.toFixed(6) : '-'),
+    '',
+    '🎯 Entry: ' + r.entry.toFixed(6),
+    '🥇 TP1: ' + r.tp1.toFixed(6),
+    '🥈 TP2: ' + r.tp2.toFixed(6),
+    '🥉 TP3: ' + r.tp3.toFixed(6),
+    '🔴 SL: ' + r.stopLoss.toFixed(6),
+    '',
+    '🧠 السبب: ' + r.reason,
+    '💬 ملاحظة السيولة: ' + r.liquidityNote,
+  ].join('\n');
 }
 
-
-
-
-const SYMBOLS = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','MATICUSDT','LINKUSDT','LTCUSDT','BCHUSDT','UNIUSDT','ATOMUSDT','XLMUSDT','ETCUSDT','FILUSDT','APTUSDT','ARBUSDT','OPUSDT','NEARUSDT','INJUSDT','SUIUSDT','TIAUSDT','SEIUSDT','RUNEUSDT','FTMUSDT','SANDUSDT','MANAUSDT','AAVEUSDT','ALGOUSDT','EGLDUSDT','EOSUSDT','XTZUSDT','THETAUSDT','AXSUSDT','GALAUSDT','CHZUSDT','ENJUSDT','ZECUSDT','DASHUSDT','KAVAUSDT','MKRUSDT','COMPUSDT','SNXUSDT','YFIUSDT','CRVUSDT','BATUSDT','ZILUSDT','ICXUSDT','ONTUSDT','QTUMUSDT','OMGUSDT','KSMUSDT','WAVESUSDT','RVNUSDT','HOTUSDT','ANKRUSDT','CELRUSDT','IOSTUSDT','STORJUSDT','SKLUSDT','CTSIUSDT','RSRUSDT','OCEANUSDT','BANDUSDT','NKNUSDT','COTIUSDT','GRTUSDT','LRCUSDT','DYDXUSDT','ENSUSDT','IMXUSDT','GMTUSDT','APEUSDT','LDOUSDT','MASKUSDT','CFXUSDT','HOOKUSDT','MAGICUSDT','HIGHUSDT','CTKUSDT','PEOPLEUSDT','ROSEUSDT','DUSKUSDT','FLOWUSDT','ALICEUSDT','TLMUSDT','C98USDT','CLVUSDT','ARPAUSDT','LITUSDT','SFPUSDT','BAKEUSDT','BNXUSDT','RAYUSDT','PERPUSDT','TRUUSDT','CKBUSDT','TWTUSDT','FIDAUSDT','AGIXUSDT','OGNUSDT','REEFUSDT','POLYXUSDT','PHBUSDT','HFTUSDT','GLMRUSDT','LOOMUSDT','BICOUSDT','API3USDT','WOOUSDT','ASTRUSDT','RADUSDT','IDEXUSDT','PONDUSDT','VGXUSDT','MDTUSDT','STMXUSDT','DGBUSDT','SXPUSDT','LSKUSDT','NMRUSDT','MTLUSDT','PAXGUSDT','TOMOUSDT','WANUSDT','FUNUSDT','CVCUSDT','BNTUSDT','RLCUSDT','STPTUSDT','DENTUSDT','WINUSDT','BTTCUSDT','ARDRUSDT','VITEUSDT','CHRUSDT','PERLUSDT','COSUSDT','NULSUSDT','VTHOUSDT','KEYUSDT','MITHUSDT','DREPUSDT','TCTUSDT','WRXUSDT','BURGERUSDT','ALPACAUSDT','SUPERUSDT','XVSUSDT','ALPHAUSDT','AUDIOUSDT','EPSUSDT','DODOUSDT','BELUSDT','PNTUSDT','UNFIUSDT','TKOUSDT','PUNDIXUSDT','VIDTUSDT','GTOUSDT','POAUSDT','QKCUSDT','BTSUSDT','BLZUSDT','IRISUSDT','KMDUSDT','JSTUSDT','SCUSDT','ZENUSDT','SRMUSDT','ANTUSDT','NANOUSDT','ATAUSDT','GTCUSDT','TORNUSDT','KEEPUSDT','ERNUSDT','KLAYUSDT','BONDUSDT','MLNUSDT','QUICKUSDT','FORTHUSDT','TRBUSDT','BSWUSDT','VOXELUSDT','XECUSDT','HIVEUSDT','FRONTUSDT','COMBOUSDT','ACMUSDT','AUCTIONUSDT','PROSUSDT','PYRUSDT','LAZIOUSDT','PORTOUSDT','SANTOSUSDT','ALPINEUSDT','CITYUSDT','OGUSDT','ASRUSDT','JUVUSDT','PSGUSDT','BARUSDT','ATMUSDT','ACAUSDT','ANCUSDT','BOSONUSDT','TVKUSDT','BADGERUSDT','FISUSDT','OMUSDT','DARUSDT','ALCXUSDT','SYSUSDT','XNOUSDT','UFTUSDT','REQUSDT','UMAUSDT','XEMUSDT','RENUSDT','KP3RUSDT','TRIBEUSDT','GHSTUSDT','DIAUSDT','ORNUSDT','UTKUSDT','MBLUSDT','SUNUSDT','MDXUSDT','ZRXUSDT','BALUSDT','GNOUSDT','LPTUSDT','RAREUSDT','VIBUSDT','DCRUSDT','ARKUSDT','MFTUSDT','POLSUSDT','CVPUSDT','EPXUSDT','XYOUSDT','LUNAUSDT','LUNCUSDT','USTCUSDT','ICPUSDT','MOVRUSDT','GLMUSDT','SCRTUSDT','AKROUSDT'];
+function formatLiquidityOnly(symbol, analysis) {
+  return [
+    '💧 ' + symbol,
+    'اتجاه السيولة: ' + analysis.liquidityBias,
+    'Liquidity High: ' + (analysis.liquidityHigh ? analysis.liquidityHigh.toFixed(6) : '-'),
+    'Liquidity Low: ' + (analysis.liquidityLow ? analysis.liquidityLow.toFixed(6) : '-'),
+    'ATR: ' + (analysis.atr ? analysis.atr.toFixed(6) : '-'),
+    'ملاحظة: ' + analysis.liquidityNote,
+  ].join('\n');
+}
 
 async function scanMarket() {
-  const btc = await getBTCTrend();
+  const btc = await getBTCRegime();
   const results = [];
-
-  for (const s of SYMBOLS) {
+  for (const symbol of SYMBOLS) {
     try {
-      const r = await analyzeSymbol(s, btc);
-      if (r.score >= 60) results.push(r);
+      const analysis = await analyzeSymbol(symbol, btc);
+      if (analysis.side !== 'flat') results.push(analysis);
     } catch (err) {
-      console.log('Skip ' + s + ': ' + err.message);
+      console.log('Skip', symbol, err.message);
     }
-    await sleep(150);
+    await sleep(SETTINGS.scanDelayMs);
   }
-
-  return results.sort((a,b)=>b.score-a.score);
+  return results.sort((a, b) => b.score - a.score);
 }
 
-bot.onText(/\/start/, (msg) => {
-  const userId = String(msg.from.id);
-  console.log('START - USER ID:', userId);
-  if (!ALLOWED_USERS.includes(userId)) return;
-  bot.sendMessage(msg.chat.id, 'VIP AI Bot Ready 🚀', mainKeyboard);
-});
+async function liquidityNow(symbol) {
+  const btc = await getBTCRegime();
+  return analyzeSymbol(symbol, btc);
+}
 
-bot.on('message', async (msg) => {
-  const userId = String(msg.from.id);
-  console.log('MESSAGE - USER ID:', userId);
-  if (!ALLOWED_USERS.includes(userId)) return;
-
-  const text = msg.text;
-
-  if (text === 'scan' || text === '🔍 مسح السوق') {
-    bot.sendMessage(msg.chat.id, '⏳ بفحص 300 عملة، ممكن ياخد دقيقة أو اتنين...');
-    try {
-      const res = await scanMarket();
-      if (res.length === 0) {
-        bot.sendMessage(msg.chat.id, 'مفيش فرص قوية دلوقتي');
-      } else {
-        for (const r of res.slice(0, 5)) {
-          bot.sendMessage(msg.chat.id, formatSignal(r));
-        }
-      }
-    } catch (err) {
-      console.log('SCAN ERROR:', err.message);
-      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
-    }
-  }
-
-  if (text === '🚀 أفضل الفرص') {
-    bot.sendMessage(msg.chat.id, '⏳ بحدد أفضل فرصة من 300 عملة...');
-    try {
-      const res = await scanMarket();
-      if (res.length === 0) {
-        bot.sendMessage(msg.chat.id, 'مفيش فرص قوية دلوقتي');
-      } else {
-        bot.sendMessage(msg.chat.id, formatSignal(res[0]));
-      }
-    } catch (err) {
-      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
-    }
-  }
-
-  if (text === 'ℹ️ المساعدة') {
-    bot.sendMessage(msg.chat.id,
-      'الأوامر المتاحة:\n🔍 مسح السوق - يفحص 300 عملة ويجيب الفرص (سكور 60+)\n🚀 أفضل الفرص - يجيب أقوى فرصة واحدة بس\nℹ️ المساعدة - الرسالة دي\n\nدرجات الإشارة:\n🟢 ممتازة (85+)\n🔵 جيدة جداً (75-84)\n🟡 جيدة (65-74)\n⚪ عادية (60-64)');
-  }
-});
-async function backtestSymbol(symbol, candles = 600, forwardWindow = 40, step = 4, interval = '1h') {
-  const k1h = await getKlines(symbol, interval, candles);
-  const kBTC = await getKlines('BTCUSDT', interval, candles);
+async function backtestSymbol(symbol, candles = 700, forwardWindow = 24, step = 1, interval = '1h') {
+  const raw = await getKlines(symbol, interval, candles);
+  const series = toCandles(raw);
+  const built = buildSignals(series);
   const results = [];
-  const minIndex = 210;
-  const maxIndex = k1h.length - forwardWindow - 1;
-  for (let i = minIndex; i < maxIndex; i += step) {
-    const slice = k1h.slice(0, i + 1);
-    const btcSlice = kBTC.slice(0, i + 1);
-    const closes = slice.map(x => +x[4]);
-    const btcCloses = btcSlice.map(x => +x[4]);
-    const price = closes.at(-1);
-    const ema = calcEMA200(closes);
-    const rsi = calcRSI(closes);
-    const macd = calcMACD(closes);
-    const atr = calcATR(slice);
-    const vwap = calcVWAP(slice);
-    const direction = price > ema ? 'Long' : 'Short';
-    const bos = detectBOS(slice);
-    const liq = detectLiquidity(slice);
-    const pat = detectPatterns(slice);
-    const ob = detectOrderBlocks(slice, direction);
-    const fvg = detectFVG(slice, direction);
-
-    const btcEma = calcEMA200(btcCloses);
-    const btcMacd = calcMACD(btcCloses);
-    let btcTrend = 'Neutral';
-    if (btcCloses.at(-1) > btcEma && btcMacd.macd > 0) btcTrend = 'Bullish';
-    if (btcCloses.at(-1) < btcEma && btcMacd.macd < 0) btcTrend = 'Bearish';
-
-    let score = 0;
-    if (direction === 'Long') {
-      if (price > ema) score += 15;
-      if (macd.macd > 0) score += 10;
-      if (rsi > 50 && rsi < 70) score += 10;
-      if (bos.bullish) score += 15;
-      if (liq.sweepLow) score += 10;
-      if (price > vwap) score += 5;
-      if (pat.bullish) score += 5;
-      if (ob) score += 15;
-      if (fvg) score += 10;
-    } else {
-      if (price < ema) score += 15;
-      if (macd.macd < 0) score += 10;
-      if (rsi < 50 && rsi > 30) score += 10;
-      if (bos.bearish) score += 15;
-      if (liq.sweepHigh) score += 10;
-      if (price < vwap) score += 5;
-      if (pat.bearish) score += 5;
-      if (ob) score += 15;
-      if (fvg) score += 10;
-    }
-    if (btcTrend !== (direction === 'Long' ? 'Bearish' : 'Bullish')) score += 5;
-
-    if (score < 60) continue;
-
-    const entry = price;
-    const sl = calcSmartSL(slice, direction, atr);
-    const targets = calcTargets(direction, entry, sl);
-
+  for (let i = 260; i < series.length - forwardWindow; i += step) {
+    const sig = built.signals[i];
+    if (!sig || sig.side === 'flat') continue;
+    if (sig.score < SETTINGS.minScore) continue;
     let outcome = 'none';
-    for (let j = i + 1; j <= i + forwardWindow && j < k1h.length; j++) {
-      const high = +k1h[j][2];
-      const low = +k1h[j][3];
-      if (direction === 'Long') {
-        if (low <= sl) { outcome = 'SL'; break; }
-        if (high >= targets.tp1) { outcome = 'TP1+'; break; }
+    for (let j = i + 1; j <= i + forwardWindow && j < series.length; j++) {
+      const high = series[j].high;
+      const low = series[j].low;
+      if (sig.side === 'Long') {
+        if (low <= sig.stopLoss) { outcome = 'SL'; break; }
+        if (high >= sig.tp1) { outcome = 'TP1+'; break; }
       } else {
-        if (high >= sl) { outcome = 'SL'; break; }
-        if (low <= targets.tp1) { outcome = 'TP1+'; break; }
+        if (high >= sig.stopLoss) { outcome = 'SL'; break; }
+        if (low <= sig.tp1) { outcome = 'TP1+'; break; }
       }
     }
-
-    results.push({ score, outcome });
+    results.push({ score: sig.score, outcome });
   }
   return results;
 }
 
-function gradeLabel(score) {
-  if (score >= 85) return '🟢 85+';
-  if (score >= 75) return '🔵 75-84';
-  if (score >= 65) return '🟡 65-74';
-  return '⚪ 60-64';
+function gradeBucket(score) {
+  if (score >= 90) return '🟢 90+';
+  if (score >= 82) return '🔵 82-89';
+  if (score >= 72) return '🟡 72-81';
+  return '⚪ <72';
 }
 
 function buildReport(allResults, label) {
   const buckets = {};
   for (const r of allResults) {
-    const g = gradeLabel(r.score);
-    if (!buckets[g]) buckets[g] = { win: 0, loss: 0, none: 0 };
-    if (r.outcome === 'TP1+') buckets[g].win++;
-    else if (r.outcome === 'SL') buckets[g].loss++;
-    else buckets[g].none++;
+    const key = gradeBucket(r.score);
+    if (!buckets[key]) buckets[key] = { win: 0, loss: 0, none: 0 };
+    if (r.outcome === 'TP1+') buckets[key].win++;
+    else if (r.outcome === 'SL') buckets[key].loss++;
+    else buckets[key].none++;
   }
-
-  let report = '📊 نتائج اختبار الاستراتيجية - ' + label + '\n\n';
-  report += 'إجمالي الإشارات المختبرة: ' + allResults.length + '\n\n';
-  const order = ['🟢 85+', '🔵 75-84', '🟡 65-74', '⚪ 60-64'];
-  for (const g of order) {
-    const b = buckets[g];
-    if (!b) { report += g + ': لا توجد إشارات كافية\n\n'; continue; }
-    const total = b.win + b.loss;
-    const winRate = total > 0 ? ((b.win / total) * 100).toFixed(1) : '0';
-    report += g + '\n✅ نجح (وصل TP1): ' + b.win + '\n❌ فشل (ضرب SL): ' + b.loss + '\n⏳ لم يتحدد: ' + b.none + '\nنسبة النجاح: ' + winRate + '%\n\n';
+  let report = '📊 باك تست - ' + label + '\n\n';
+  report += 'إجمالي الإشارات: ' + allResults.length + '\n\n';
+  for (const key of ['🟢 90+', '🔵 82-89', '🟡 72-81', '⚪ <72']) {
+    const b = buckets[key];
+    if (!b) { report += key + ': لا توجد بيانات\n\n'; continue; }
+    const decided = b.win + b.loss;
+    const winRate = decided > 0 ? ((b.win / decided) * 100).toFixed(1) : '0.0';
+    report += key + '\n✅ TP1+: ' + b.win + '\n❌ SL: ' + b.loss + '\n⏳ غير محسوم: ' + b.none + '\n📌 Win rate: ' + winRate + '%\n\n';
   }
-  report += '⚠️ ملاحظة: اختبار مبسط على بيانات محدودة، لا يضمن أداء مستقبلياً مماثلاً.';
+  report += '⚠️ الاختبار مبسط وعلى شموع مغلقة فقط.';
   return report;
-}
+}function createBot() {
+  if (!BOT_TOKEN) throw new Error('BOT_TOKEN is missing');
+  const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-bot.onText(/\/backtest(?:\s+(.+))?/, async (msg, match) => {
-  const userId = String(msg.from.id);
-  if (!ALLOWED_USERS.includes(userId)) return;
-  const arg = match && match[1] ? match[1].trim().toUpperCase() : null;
+  console.log('LIQUIDITY TBP PRO BOT RUNNING');
 
-  if (arg) {
-    bot.sendMessage(msg.chat.id, '📊 جاري اختبار ' + arg + ' على آخر 3 شهور تقريباً، هياخد دقيقة...');
+  bot.on('polling_error', (err) => {
+    console.log('POLLING ERROR:', err.code, err.message);
+  });
+
+  bot.onText(/\/start/, (msg) => {
+    if (!isAllowed(msg.from.id)) return;
+    bot.sendMessage(msg.chat.id, 'Liquidity TBP Pro Ready 🚀', mainKeyboard);
+  });
+
+  bot.onText(/\/liquidity(?:\s+(.+))?/, async (msg, match) => {
+    if (!isAllowed(msg.from.id)) return;
+    const symbol = match && match[1] ? match[1].trim().toUpperCase() : 'BTCUSDT';
     try {
-      const results = await backtestSymbol(arg, 540, 10, 2, '4h');
-      if (results.length === 0) {
-        bot.sendMessage(msg.chat.id, 'لم يتم العثور على إشارات بسكور 60+ لعملة ' + arg + ' خلال آخر 3 شهور تقريباً.');
+      const analysis = await liquidityNow(symbol);
+      await bot.sendMessage(msg.chat.id, formatLiquidityOnly(symbol, analysis));
+    } catch (err) {
+      await bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
+    }
+  });
+
+  bot.onText(/\/backtest(?:\s+(.+))?/, async (msg, match) => {
+    if (!isAllowed(msg.from.id)) return;
+    const symbol = match && match[1] ? match[1].trim().toUpperCase() : 'BTCUSDT';
+    try {
+      bot.sendMessage(msg.chat.id, '📊 جاري اختبار ' + symbol + '...');
+      const results = await backtestSymbol(symbol, 700, 24, 1, '1h');
+      if (!results.length) {
+        await bot.sendMessage(msg.chat.id, 'لا توجد إشارات كافية للاختبار.');
         return;
       }
-      const report = buildReport(results, arg + ' (آخر ~3 شهور)');
-      bot.sendMessage(msg.chat.id, report);
+      await bot.sendMessage(msg.chat.id, buildReport(results, symbol + ' 1H'));
     } catch (err) {
-      console.log('BACKTEST SYMBOL ERROR:', err.message);
-      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message + '\nتأكد من كتابة اسم العملة صحيح مثل BTCUSDT');
+      await bot.sendMessage(msg.chat.id, '❌ حصل خطأ في الباك تست: ' + err.message);
     }
-  } else {
-    bot.sendMessage(msg.chat.id, '📊 جاري اختبار الاستراتيجية على بيانات تاريخية، هياخد دقيقة أو اتنين...');
-    try {
-      const testSymbols = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','LINKUSDT','LTCUSDT','UNIUSDT','ATOMUSDT','NEARUSDT','ARBUSDT'];
-      let allResults = [];
-      for (const s of testSymbols) {
-        try {
-          const r = await backtestSymbol(s);
-          allResults = allResults.concat(r);
-        } catch (e) {
-          console.log('Backtest skip ' + s + ': ' + e.message);
+  });
+
+  bot.on('message', async (msg) => {
+    if (!isAllowed(msg.from.id)) return;
+    const text = msg.text;
+    if (!text) return;
+
+    if (text === '🔍 مسح السوق') {
+      try {
+        await bot.sendMessage(msg.chat.id, '⏳ جاري مسح السوق مع فلتر السيولة...');
+        const results = await scanMarket();
+        if (!results.length) {
+          await bot.sendMessage(msg.chat.id, 'مفيش فرص قوية حالياً.');
+          return;
         }
-        await sleep(300);
-      }
-      const report = buildReport(allResults, 'كل العملات (آخر ~25 يوم)');
-      bot.sendMessage(msg.chat.id, report);
-    } catch (err) {
-      console.log('BACKTEST ERROR:', err.message);
-      bot.sendMessage(msg.chat.id, '❌ حصل خطأ في الاختبار: ' + err.message);
-    }
-  }
-});
-function calcADX(klines, period = 14) {
-  const plusDMs = [], minusDMs = [], trs = [];
-  for (let i = 1; i < klines.length; i++) {
-    const high = +klines[i][2];
-    const low = +klines[i][3];
-    const prevHigh = +klines[i - 1][2];
-    const prevLow = +klines[i - 1][3];
-    const prevClose = +klines[i - 1][4];
-    const upMove = high - prevHigh;
-    const downMove = prevLow - low;
-    plusDMs.push((upMove > downMove && upMove > 0) ? upMove : 0);
-    minusDMs.push((downMove > upMove && downMove > 0) ? downMove : 0);
-    trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
-  }
-  const recentTR = trs.slice(-period).reduce((a, b) => a + b, 0);
-  const recentPlusDM = plusDMs.slice(-period).reduce((a, b) => a + b, 0);
-  const recentMinusDM = minusDMs.slice(-period).reduce((a, b) => a + b, 0);
-  const plusDI = recentTR === 0 ? 0 : (recentPlusDM / recentTR) * 100;
-  const minusDI = recentTR === 0 ? 0 : (recentMinusDM / recentTR) * 100;
-  const adx = (plusDI + minusDI) === 0 ? 0 : (Math.abs(plusDI - minusDI) / (plusDI + minusDI)) * 100;
-  return { adx, plusDI, minusDI };
-}
-
-function calcBollingerBands(closes, period = 20, stdDevMult = 2) {
-  const slice = closes.slice(-period);
-  const mean = slice.reduce((a, b) => a + b, 0) / slice.length;
-  const variance = slice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / slice.length;
-  const stdDev = Math.sqrt(variance);
-  return { mid: mean, upper: mean + stdDev * stdDevMult, lower: mean - stdDev * stdDevMult };
-}
-
-function calcSupertrend(klines, period = 10, multiplier = 3) {
-  const atr = calcATR(klines, period);
-  const last = klines.at(-1);
-  const high = +last[2];
-  const low = +last[3];
-  const close = +last[4];
-  const hl2 = (high + low) / 2;
-  const basicUpper = hl2 + multiplier * atr;
-  const basicLower = hl2 - multiplier * atr;
-  const prevClose = +klines.at(-2)[4];
-  let trend = 'Up';
-  if (close > basicUpper) trend = 'Up';
-  else if (close < basicLower) trend = 'Down';
-  else trend = (close > prevClose) ? 'Up' : 'Down';
-  return { trend, upperBand: basicUpper, lowerBand: basicLower };
-}
-
-async function analyzeSymbolPro(symbol, btc) {
-  const k = await getKlines(symbol, '1h', 200);
-  const closes = k.map(x => +x[4]);
-  const price = closes.at(-1);
-  const ema = calcEMA200(closes);
-  const rsi = calcRSI(closes);
-  const macd = calcMACD(closes);
-  const atr = calcATR(k);
-  const vwap = calcVWAP(k);
-  const direction = price > ema ? 'Long' : 'Short';
-  const bos = detectBOS(k);
-  const liq = detectLiquidity(k);
-  const pat = detectPatterns(k);
-  const ob = detectOrderBlocks(k, direction);
-  const fvg = detectFVG(k, direction);
-  const adxData = calcADX(k);
-  const bb = calcBollingerBands(closes);
-  const st = calcSupertrend(k);
-  let score = 0;
-  if (direction === 'Long') {
-    if (price > ema) score += 15;
-    if (macd.macd > 0) score += 10;
-    if (rsi > 50 && rsi < 70) score += 10;
-    if (bos.bullish) score += 15;
-    if (liq.sweepLow) score += 10;
-    if (price > vwap) score += 5;
-    if (pat.bullish) score += 5;
-    if (ob) score += 15;
-    if (fvg) score += 10;
-  } else {
-    if (price < ema) score += 15;
-    if (macd.macd < 0) score += 10;
-    if (rsi < 50 && rsi > 30) score += 10;
-    if (bos.bearish) score += 15;
-    if (liq.sweepHigh) score += 10;
-    if (price < vwap) score += 5;
-    if (pat.bearish) score += 5;
-    if (ob) score += 15;
-    if (fvg) score += 10;
-  }
-  if (btc.trend !== (direction === 'Long' ? 'Bearish' : 'Bullish')) score += 5;
-  if (adxData.adx > 25) score += 10;
-  if (direction === 'Long' && price <= bb.lower * 1.01) score += 5;
-  if (direction === 'Short' && price >= bb.upper * 0.99) score += 5;
-  if (st.trend === 'Up' && direction === 'Long') score += 10;
-  if (st.trend === 'Down' && direction === 'Short') score += 10;
-  const confirmed4h = await get4hConfirmation(symbol, direction);
-  if (confirmed4h) score += 10;
-  const entry = price;
-  const sl = calcSmartSL(k, direction, atr);
-  const targets = calcTargets(direction, entry, sl);
-  return {
-    symbol, direction, price, score,
-    grade: getSignalGrade(score),
-    entry,
-    tp1: targets.tp1, tp2: targets.tp2, tp3: targets.tp3,
-    sl, hasOB: !!ob, hasFVG: !!fvg, confirmed4h,
-    adx: adxData.adx, supertrend: st.trend,
-  };
-}
-
-function formatSignalPro(r) {
-  return `
-🔥 ${r.symbol} ${r.direction} (VIP)
-${r.grade}
-
-💰 Price: ${r.price}
-⭐ Score: ${r.score}/100
-✅ تأكيد 4 ساعات: ${r.confirmed4h ? 'نعم' : 'لا'}
-📦 Order Block: ${r.hasOB ? 'موجود' : 'لا'}
-📊 Fair Value Gap: ${r.hasFVG ? 'موجود' : 'لا'}
-📈 ADX (قوة الاتجاه): ${r.adx.toFixed(1)}
-🌀 Supertrend: ${r.supertrend}
-
-🎯 Entry: ${r.entry}
-🥇 TP1: ${r.tp1}
-🥈 TP2: ${r.tp2}
-🥉 TP3: ${r.tp3}
-🔴 SL: ${r.sl}
-
-💡 VIP SUPER SIGNAL
-`;
-}
-
-async function scanMarketPro() {
-  const btc = await getBTCTrend();
-  const results = [];
-  for (const s of SYMBOLS) {
-    try {
-      const r = await analyzeSymbolPro(s, btc);
-      if (r.score >= 60) results.push(r);
-    } catch (err) {
-      console.log('Skip Pro ' + s + ': ' + err.message);
-    }
-    await sleep(150);
-  }
-  return results.sort((a, b) => b.score - a.score);
-}
-
-async function backtestSymbolPro(symbol, candles = 600, forwardWindow = 40, step = 4, interval = '1h') {
-  const k1h = await getKlines(symbol, interval, candles);
-  const kBTC = await getKlines('BTCUSDT', interval, candles);
-  const results = [];
-  const minIndex = 210;
-  const maxIndex = k1h.length - forwardWindow - 1;
-  for (let i = minIndex; i < maxIndex; i += step) {
-    const slice = k1h.slice(0, i + 1);
-    const btcSlice = kBTC.slice(0, i + 1);
-    const closes = slice.map(x => +x[4]);
-    const btcCloses = btcSlice.map(x => +x[4]);
-    const price = closes.at(-1);
-    const ema = calcEMA200(closes);
-    const rsi = calcRSI(closes);
-    const macd = calcMACD(closes);
-    const atr = calcATR(slice);
-    const vwap = calcVWAP(slice);
-    const direction = price > ema ? 'Long' : 'Short';
-    const bos = detectBOS(slice);
-    const liq = detectLiquidity(slice);
-    const pat = detectPatterns(slice);
-    const ob = detectOrderBlocks(slice, direction);
-    const fvg = detectFVG(slice, direction);
-
-    const btcEma = calcEMA200(btcCloses);
-    const btcMacd = calcMACD(btcCloses);
-    let btcTrend = 'Neutral';
-    if (btcCloses.at(-1) > btcEma && btcMacd.macd > 0) btcTrend = 'Bullish';
-    if (btcCloses.at(-1) < btcEma && btcMacd.macd < 0) btcTrend = 'Bearish';
-
-    let score = 0;
-    if (direction === 'Long') {
-      if (price > ema) score += 15;
-      if (macd.macd > 0) score += 10;
-      if (rsi > 50 && rsi < 70) score += 10;
-      if (bos.bullish) score += 15;
-      if (liq.sweepLow) score += 10;
-      if (price > vwap) score += 5;
-      if (pat.bullish) score += 5;
-      if (ob) score += 15;
-      if (fvg) score += 10;
-    } else {
-      if (price < ema) score += 15;
-      if (macd.macd < 0) score += 10;
-      if (rsi < 50 && rsi > 30) score += 10;
-      if (bos.bearish) score += 15;
-      if (liq.sweepHigh) score += 10;
-      if (price < vwap) score += 5;
-      if (pat.bearish) score += 5;
-      if (ob) score += 15;
-      if (fvg) score += 10;
-    }
-    if (btcTrend !== (direction === 'Long' ? 'Bearish' : 'Bullish')) score += 5;
-
-    const adxData = calcADX(slice);
-    const bb = calcBollingerBands(closes);
-    const st = calcSupertrend(slice);
-    if (adxData.adx > 25) score += 10;
-    if (direction === 'Long' && price <= bb.lower * 1.01) score += 5;
-    if (direction === 'Short' && price >= bb.upper * 0.99) score += 5;
-    if (st.trend === 'Up' && direction === 'Long') score += 10;
-    if (st.trend === 'Down' && direction === 'Short') score += 10;
-
-    if (score < 60) continue;
-
-    const entry = price;
-    const sl = calcSmartSL(slice, direction, atr);
-    const targets = calcTargets(direction, entry, sl);
-
-    let outcome = 'none';
-    for (let j = i + 1; j <= i + forwardWindow && j < k1h.length; j++) {
-      const high = +k1h[j][2];
-      const low = +k1h[j][3];
-      if (direction === 'Long') {
-        if (low <= sl) { outcome = 'SL'; break; }
-        if (high >= targets.tp1) { outcome = 'TP1+'; break; }
-      } else {
-        if (high >= sl) { outcome = 'SL'; break; }
-        if (low <= targets.tp1) { outcome = 'TP1+'; break; }
-      }
-    }
-
-    results.push({ score, outcome });
-  }
-  return results;
-}
-
-bot.onText(/\/vip/, async (msg) => {
-  const userId = String(msg.from.id);
-  if (!ALLOWED_USERS.includes(userId)) return;
-  bot.sendMessage(msg.chat.id, '👑 جاري فحص السوق بنظام VIP (مع ADX + Bollinger + Supertrend)...');
-  try {
-    const res = await scanMarketPro();
-    if (res.length === 0) {
-      bot.sendMessage(msg.chat.id, 'مفيش فرص VIP قوية دلوقتي');
-    } else {
-      for (const r of res.slice(0, 5)) {
-        bot.sendMessage(msg.chat.id, formatSignalPro(r));
-      }
-    }
-  } catch (err) {
-    console.log('VIP SCAN ERROR:', err.message);
-    bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
-  }
-});
-
-bot.onText(/\/bestvip/, async (msg) => {
-  const userId = String(msg.from.id);
-  if (!ALLOWED_USERS.includes(userId)) return;
-  bot.sendMessage(msg.chat.id, '👑 جاري تحديد أفضل فرصة VIP...');
-  try {
-    const res = await scanMarketPro();
-    if (res.length === 0) {
-      bot.sendMessage(msg.chat.id, 'مفيش فرص VIP قوية دلوقتي');
-    } else {
-      bot.sendMessage(msg.chat.id, formatSignalPro(res[0]));
-    }
-  } catch (err) {
-    bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
-  }
-});
-
-bot.onText(/\/backtestpro(?:\s+(.+))?/, async (msg, match) => {
-  const userId = String(msg.from.id);
-  if (!ALLOWED_USERS.includes(userId)) return;
-  const arg = match && match[1] ? match[1].trim().toUpperCase() : null;
-
-  if (arg) {
-    bot.sendMessage(msg.chat.id, '👑 جاري اختبار VIP لـ ' + arg + ' على آخر 3 شهور تقريباً...');
-    try {
-      const results = await backtestSymbolPro(arg, 540, 10, 2, '4h');
-      if (results.length === 0) {
-        bot.sendMessage(msg.chat.id, 'لم يتم العثور على إشارات VIP لعملة ' + arg);
-        return;
-      }
-      const report = buildReport(results, arg + ' VIP (آخر ~3 شهور)');
-      bot.sendMessage(msg.chat.id, report);
-    } catch (err) {
-      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
-    }
-  } else {
-    bot.sendMessage(msg.chat.id, '👑 جاري اختبار نظام VIP العام...');
-    try {
-      const testSymbols = ['BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','DOTUSDT','LINKUSDT','LTCUSDT','UNIUSDT','ATOMUSDT','NEARUSDT','ARBUSDT'];
-      let allResults = [];
-      for (const s of testSymbols) {
-        try {
-          const r = await backtestSymbolPro(s);
-          allResults = allResults.concat(r);
-        } catch (e) {
-          console.log('Backtest Pro skip ' + s + ': ' + e.message);
+        for (const r of results.slice(0, SETTINGS.topScanCount)) {
+          await bot.sendMessage(msg.chat.id, formatSignal(r));
         }
-        await sleep(300);
+      } catch (err) {
+        await bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
       }
-      const report = buildReport(allResults, 'VIP كل العملات');
-      bot.sendMessage(msg.chat.id, report);
-    } catch (err) {
-      bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
     }
-  }
-});
+
+    if (text === '🚀 أفضل فرصة') {
+      try {
+        await bot.sendMessage(msg.chat.id, '⏳ جاري تحديد أفضل فرصة...');
+        const results = await scanMarket();
+        if (!results.length) {
+          await bot.sendMessage(msg.chat.id, 'مفيش فرص قوية حالياً.');
+          return;
+        }
+        await bot.sendMessage(msg.chat.id, formatSignal(results[0]));
+      } catch (err) {
+        await bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
+      }
+    }
+
+    if (text === '💧 السيولة الآن') {
+      try {
+        const analysis = await liquidityNow('BTCUSDT');
+        await bot.sendMessage(msg.chat.id, formatLiquidityOnly('BTCUSDT', analysis));
+      } catch (err) {
+        await bot.sendMessage(msg.chat.id, '❌ حصل خطأ: ' + err.message);
+      }
+    }
+
+    if (text === 'ℹ️ المساعدة') {
+      await bot.sendMessage(msg.chat.id,
+        'الأوامر المتاحة:\n' +
+        '🔍 مسح السوق - يفحص العملات مع فلتر السيولة\n' +
+        '🚀 أفضل فرصة - أقوى إشارة واحدة\n' +
+        '💧 السيولة الآن - حالة سيولة BTC\n' +
+        '/liquidity BTCUSDT - سيولة عملة معينة\n' +
+        '/backtest BTCUSDT - باك تست عملة معينة\n\n' +
+        'النظام يعتمد على:\n' +
+        '1) اتجاه الترند (3 EMA + ADX)\n' +
+        '2) مناطق السيولة أعلى/أسفل\n' +
+        '3) Sweep + Rejection أو Acceptance\n' +
+        '4) Breakout ثم Pullback ثم Reclaim'
+      );
+    }
+  });
+
+  return bot;
+}
+
+if (require.main === module) {
+  createBot();
+}
+
+module.exports = {
+  SETTINGS,
+  getLiquidityState,
+  buildSignals,
+  analyzeSymbol,
+  backtestSymbol,
+  createBot,
+};
